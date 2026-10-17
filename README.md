@@ -62,7 +62,7 @@ SmartScreen の「Windows によって PC が保護されました」が出た�
 
 - 履歴の本文・画像・コピー元アプリ名などは、AES-256-GCM で暗号化して SQLite のファイル `nuebako.db` に保存します。平文で残るのは日時だけです(並べ替えと保存期間の判定に使います)。
 - 暗号鍵は OS のキーチェーン(macOS: キーチェーン、Windows: 資格情報マネージャー)に保存します。鍵はファイルに書きません。
-- 保存場所は、Tauri の `app_data_dir`(識別子 `io.github.agaemo.nuebako`)配下の `nuebako.db` です。OS ごとの一般的な場所は、macOS が `~/Library/Application Support/` 配下、Windows が `%APPDATA%` 配下です(正確なパスは今後確認して追記します)。
+- 保存場所(macOS で確認済み): 履歴は `~/Library/Application Support/io.github.agaemo.nuebako/nuebako.db`、設定は同じフォルダの `settings.json` です。Windows は `%APPDATA%\io.github.agaemo.nuebako\`(Tauri の既定の場所。実機では未確認)です。
 - 鍵が取得できない場合(キーチェーンのリセットなど)は、履歴を読み込まず、書き込まず、鍵も作り直しません。保存済みのファイルは変更されません。
 
 ## 機密情報の扱い
@@ -75,7 +75,7 @@ SmartScreen の「Windows によって PC が保護されました」が出た�
 
 - 検索では Unicode の NFC 正規化を行いません。macOS 由来の NFD 形式の文字列(濁点・半濁点が分離した形のファイル名など)は、見た目が同じでも、検索語と一致しない場合があります。
 - Windows は実機での確認が限定的です。特にフォーカスの復帰と自動貼り付けは、環境によって動作が異なる可能性があります。管理者権限で動いているウィンドウへは貼り付けられない場合があります(再コピーのみ行われます)。
-- 動作確認した macOS のバージョン: (今後追記します)
+- 動作確認した macOS のバージョン: macOS 26.6(Apple Silicon)。それより古い macOS では、画面の表示(Tailwind CSS v4 が必要とする WebKit)が崩れる可能性があります。
 
 ## 開発者向け
 
