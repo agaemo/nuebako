@@ -1,6 +1,6 @@
 name: Release
 
-# v* タグの push でインストーラをビルドし、GitHub Releases に公開する。
+# v* タグの push で、macOS(Apple Silicon)のインストーラをビルドし、GitHub Releases に公開する。
 # 構成の方針: 依存のビルド(サードパーティのコードが走る)は、書き込み権限のない build ジョブだけで行う。
 # リリースへの添付は、ビルドを含まない publish ジョブだけが行う。失敗した場合は、リリースを作らない。
 on:
@@ -70,10 +70,8 @@ jobs:
             args: "--target aarch64-apple-darwin"
             targets: aarch64-apple-darwin
             name: macos-arm64
-          - os: windows-latest
-            args: ""
-            targets: ""
-            name: windows-x64
+          # Windows のインストーラは、実機での確認ができるまで、配布しない(CI のビルドとテストは ci.yml で行う)。
+          # 追加するときは、ここに windows-latest を足し、provenance の SHA256SUMS の対象(*.exe)も確認する。
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,6 +127,7 @@ jobs:
         shell: bash
         run: |
           set -eu
+          shopt -s nullglob
           cd release
           sha256sum -- *.dmg *.exe > SHA256SUMS
           cat SHA256SUMS

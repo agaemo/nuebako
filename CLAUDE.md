@@ -1,6 +1,6 @@
 # nuebako
 
-クリップボードの履歴を暗号化してローカルに保存し、ショートカットで呼び出して検索・貼り付けする常駐デスクトップアプリ(macOS Apple Silicon と Windows x64)。個人・職場での利用向けで、配布は GitHub Releases(署名なし)。設計と実装計画は `.craft/docs/plan.md`(git 管理外)にある。
+クリップボードの履歴を暗号化してローカルに保存し、ショートカットで呼び出して検索・貼り付けする常駐デスクトップアプリ(macOS Apple Silicon と Windows x64)。個人・職場での利用向けで、配布は GitHub Releases(署名なし。いまは macOS のみで、Windows は実機での確認ができるまで配布しない)。設計と実装計画は `.craft/docs/plan.md`(git 管理外)にある。
 
 ## スタック
 
