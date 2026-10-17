@@ -109,7 +109,6 @@ export type AppErrorCode =
   | "shortcut_conflict"
   | "not_found"
   | "clipboard"
-  | "permission_denied"
   | "internal";
 
 /** Rust の AppError。invoke の失敗時に、この形で受け取る。 */
