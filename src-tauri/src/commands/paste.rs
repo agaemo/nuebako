@@ -1,4 +1,4 @@
-//! 貼り付け。track-clipboard が実装する。
+//! 貼り付け。
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -15,6 +15,7 @@ use crate::history::clock::{Clock, SystemClock};
 use crate::paste::flow::{PasteFlow, PasteWindow, Waiter, WriteSuppressor};
 use crate::paste::keys::EnigoKeySender;
 use crate::paste::permission::SystemPermission;
+use crate::paste::target::SystemPasteTarget;
 use crate::paste::writer::ClipboardRsWriter;
 
 /// 実行中フラグ(二重実行の防止)。アプリ全体で1つ。
@@ -62,14 +63,16 @@ pub async fn paste_clip(
         Some(state) => state.history.clone(),
         None => return Err(AppError::Internal("アプリの状態が未登録です".to_string())),
     };
+    let waiter: Arc<dyn Waiter> = Arc::new(SleepWaiter);
     let flow = PasteFlow {
         provider,
         writer: Arc::new(ClipboardRsWriter),
         keys: Arc::new(EnigoKeySender::new(app.clone())),
         permission: Arc::new(SystemPermission),
+        target: Arc::new(SystemPasteTarget::new(waiter.clone())),
         window: Arc::new(HistoryWindow(app)),
         suppressor: Arc::new(SharedSuppressor),
-        waiter: Arc::new(SleepWaiter),
+        waiter,
         busy: BUSY.clone(),
     };
     tauri::async_runtime::spawn_blocking(move || flow.run(id, mode))

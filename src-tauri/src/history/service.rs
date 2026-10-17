@@ -3,39 +3,39 @@
 //! 全件をメモリに持ち(本文は復号済み)、検索と重複判定はメモリ上で行う。
 //! 画像本体だけは必要になるまで DB から復号して読む。
 //! 時刻の保存は UTC の Unix ミリ秒。
+//!
+//! 重い処理(10MB の復号、base64 化、ハッシュ)は、ロックを持たない所で行う。
+//! ロックを持ったまま行うと、その間の検索や記録がすべて待たされるため。
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::clock::Clock;
-use super::search::{self, first_line, fold, is_blank};
-use super::{ClipProvider, ClipRecorder, IgnoreReason, RecordOutcome};
+use super::hash::fnv1a_64;
+use super::search::{self, fold, is_blank, preview};
+use super::{ClipProvider, ClipRecorder, IgnoreReason, MAX_IMAGE_BYTES, RecordOutcome};
 use crate::crypto::cipher::Cipher;
 use crate::crypto::keystore::{KeyStore, load_or_create};
 use crate::domain::clip::{AppRef, ClipContent, ClipKind, NewClip};
 use crate::domain::dto::{ClipDetail, ClipSummary, StorageStatus};
+use crate::domain::settings::{DEFAULT_MAX_ITEMS, DEFAULT_RETENTION_DAYS};
 use crate::error::AppError;
 use crate::storage::repo::{Payload, Repo, StoredRow, base64_decode, base64_encode};
-use crate::storage::schema;
+use crate::storage::{perms, schema};
 use rusqlite::Connection;
 
 /// テキスト1件の上限(UTF-8 で 1 MiB)。
 const MAX_TEXT_BYTES: usize = 1_048_576;
-/// 画像1件の上限(10 MiB)。
-const MAX_IMAGE_BYTES: usize = 10_485_760;
 const DAY_MS: i64 = 86_400_000;
-/// 既定の件数上限と保存日数(`Settings` の既定値と同じ)。
-const DEFAULT_MAX_ITEMS: u32 = 1000;
-const DEFAULT_RETENTION_DAYS: u32 = 30;
 /// 画像の行に表示する先頭行。
 const IMAGE_LABEL: &str = "(画像)";
 
-/// 検索結果。
+/// 検索結果(`offset` から `limit` 件分)。
 pub struct SearchResult {
     /// 履歴の全件数(検索条件に関わらない)
     pub total: u32,
+    /// 検索に一致した全件数(`items` はこのうちの一部)
+    pub matched: u32,
     pub items: Vec<ClipSummary>,
 }
 
@@ -62,7 +62,7 @@ impl Entry {
         let p = row.payload;
         let text = p.text;
         let (folded, text_hash, char_count) = match &text {
-            Some(t) => (fold(t), hash_of(t.as_bytes()), t.chars().count() as u32),
+            Some(t) => (fold(t), fnv1a_64(t.as_bytes()), t.chars().count() as u32),
             None => (String::new(), 0, 0),
         };
         Entry {
@@ -97,13 +97,18 @@ impl Entry {
     }
 
     fn summary(&self) -> ClipSummary {
+        let (first_line, extra_lines) = match &self.text {
+            Some(t) => {
+                let p = preview(t);
+                (p.first_line, p.extra_lines)
+            }
+            None => (IMAGE_LABEL.to_string(), 0),
+        };
         ClipSummary {
             id: self.id,
             kind: self.kind,
-            first_line: match &self.text {
-                Some(t) => first_line(t),
-                None => IMAGE_LABEL.to_string(),
-            },
+            first_line,
+            extra_lines,
             copied_at_ms: self.copied_at_ms,
             pinned: self.pinned,
             source_app_name: self.source_app.as_ref().map(|a| a.name.clone()),
@@ -111,12 +116,6 @@ impl Entry {
             thumb_png: self.thumb_b64.clone(),
         }
     }
-}
-
-fn hash_of(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
 }
 
 /// 利用できる状態。
@@ -139,23 +138,39 @@ pub struct HistoryService {
     skipped: u32,
 }
 
-/// 上限(件数・保存期間)を適用すると削除される id を返す。ピン留めは対象外。
+/// 上限(件数・保存期間)を適用したときの削除の計画。
+struct LimitPlan {
+    /// 削除する id
+    ids: Vec<i64>,
+    /// 保存期間を過ぎているが、時計の異常を疑って削除を見送った件数
+    held_back: u32,
+}
+
+/// 上限(件数・保存期間)を適用すると削除される id を求める。ピン留めは対象外。
+///
 /// 保存期間は「経過時間が保存期間を超えた」もの(ちょうどは残す)。未来の時刻は消さない。
+/// 期間による削除は、期間内の記録が1件以上あるときだけ行う。全件が期間外に見えるのは、
+/// 時計が大きく進んだときの可能性が高く、そのまま消すと履歴が全損するため。
 /// 件数はピン留めを除いた件数で数え、新しい順に残す。
-fn over_limit_ids(entries: &[Entry], max_items: u32, retention_days: u32, now: i64) -> Vec<i64> {
+fn plan_limits(entries: &[Entry], max_items: u32, retention_days: u32, now: i64) -> LimitPlan {
     let cutoff = now.saturating_sub(i64::from(retention_days).saturating_mul(DAY_MS));
+    let clock_plausible = entries.iter().any(|e| e.copied_at_ms >= cutoff);
     let mut live: Vec<&Entry> = Vec::new();
     let mut ids = Vec::new();
+    let mut held_back = 0;
     for e in entries.iter().filter(|e| !e.pinned) {
-        if e.copied_at_ms < cutoff {
+        if e.copied_at_ms >= cutoff {
+            live.push(e);
+        } else if clock_plausible {
             ids.push(e.id);
         } else {
+            held_back += 1;
             live.push(e);
         }
     }
     live.sort_by(|a, b| b.copied_at_ms.cmp(&a.copied_at_ms).then(b.id.cmp(&a.id)));
     ids.extend(live.iter().skip(max_items as usize).map(|e| e.id));
-    ids
+    LimitPlan { ids, held_back }
 }
 
 impl Active {
@@ -187,12 +202,19 @@ impl Active {
         retention_days: u32,
         now: i64,
     ) -> Result<u32, AppError> {
-        let ids = over_limit_ids(&self.entries, max_items, retention_days, now);
-        if ids.is_empty() {
+        let plan = plan_limits(&self.entries, max_items, retention_days, now);
+        if plan.held_back > 0 {
+            // 内容は出さず、件数だけを残す
+            eprintln!(
+                "保存期間を過ぎた履歴 {} 件は、時計が進んだ可能性があるため削除しませんでした",
+                plan.held_back
+            );
+        }
+        if plan.ids.is_empty() {
             return Ok(0);
         }
-        let n = self.repo.delete_ids(&ids)?;
-        self.entries.retain(|e| !ids.contains(&e.id));
+        let n = self.repo.delete_ids(&plan.ids)?;
+        self.entries.retain(|e| !plan.ids.contains(&e.id));
         Ok(n)
     }
 
@@ -201,15 +223,9 @@ impl Active {
         kind: ClipKind,
         source_app: Option<AppRef>,
         text: String,
+        hash: u64,
         now: i64,
     ) -> Result<RecordOutcome, AppError> {
-        if is_blank(&text) {
-            return Ok(RecordOutcome::Ignored(IgnoreReason::Blank));
-        }
-        if text.len() > MAX_TEXT_BYTES {
-            return Ok(RecordOutcome::Ignored(IgnoreReason::TooLarge));
-        }
-        let hash = hash_of(text.as_bytes());
         if let Some(e) = self.entries.iter_mut().find(|e| {
             !e.is_image() && e.text_hash == hash && e.text.as_deref() == Some(text.as_str())
         }) {
@@ -230,17 +246,14 @@ impl Active {
     fn record_image(
         &mut self,
         source_app: Option<AppRef>,
-        png: Vec<u8>,
-        thumb_png: Vec<u8>,
+        image: PreparedImage,
         now: i64,
     ) -> Result<RecordOutcome, AppError> {
-        if png.is_empty() {
-            return Ok(RecordOutcome::Ignored(IgnoreReason::Blank));
-        }
-        if png.len() > MAX_IMAGE_BYTES {
-            return Ok(RecordOutcome::Ignored(IgnoreReason::TooLarge));
-        }
-        let hash = hash_of(&png);
+        let PreparedImage {
+            png,
+            hash,
+            thumb_b64,
+        } = image;
         let candidates: Vec<i64> = self
             .entries
             .iter()
@@ -261,7 +274,7 @@ impl Active {
             text: None,
             source_app,
             pinned: false,
-            thumb_png: Some(base64_encode(&thumb_png)),
+            thumb_png: Some(thumb_b64),
             blob_hash: Some(hash),
         };
         let id = self.repo.insert(now, &payload, Some(&png))?;
@@ -274,8 +287,23 @@ impl Active {
     }
 }
 
-fn lock_err<T>(_: std::sync::PoisonError<T>) -> AppError {
-    AppError::Internal("履歴の内部状態にアクセスできません".to_string())
+/// 記録の前に、ロックの外で済ませておく処理(ハッシュ、base64 化)をした画像。
+struct PreparedImage {
+    png: Vec<u8>,
+    hash: u64,
+    thumb_b64: String,
+}
+
+/// ロックの外で復号するために、ロックの中で取り出した画像本体の暗号文。
+struct SealedBlob {
+    encrypted: Vec<u8>,
+    cipher: Arc<Cipher>,
+}
+
+impl SealedBlob {
+    fn open(self, id: i64) -> Result<Vec<u8>, AppError> {
+        Repo::decrypt_blob(&self.cipher, id, &self.encrypted)
+    }
 }
 
 impl HistoryService {
@@ -291,8 +319,7 @@ impl HistoryService {
     /// 戻り値の 2 つ目は状態、3 つ目は利用者に見せる理由(正常時は `None`)。
     /// 使えない状態でも `HistoryService` は返り、全メソッドが理由のエラーを返す。
     ///
-    /// 上限(件数・保存期間)は既定値(1,000 件・30 日)で始まる。設定を読んだ後に
-    /// `set_limits` か `apply_limits` を呼ぶこと。
+    /// 上限(件数・保存期間)は既定値で始まる。設定を読んだ後に `apply_limits` を呼ぶこと。
     pub fn open(
         db_path: &Path,
         key_store: &dyn KeyStore,
@@ -339,6 +366,8 @@ impl HistoryService {
             key
         };
         let conn = Connection::open(db_path).map_err(schema::db_err)?;
+        // WAL と共有メモリのファイルは、DB ファイルの権限を引き継いで作られるため、先に絞る
+        perms::restrict_db_files(db_path);
         let version = schema::user_version(&conn)?;
         let repo = Repo::new(conn, Cipher::new(key));
         if version == 0 {
@@ -359,6 +388,7 @@ impl HistoryService {
                 "新しい版のアプリで作られたデータベースのため、読み込めません".to_string(),
             ));
         }
+        perms::restrict_db_files(db_path);
         Active::load(repo)
     }
 
@@ -373,20 +403,21 @@ impl HistoryService {
         })
     }
 
-    /// `record` のたびに適用する上限を設定する。設定を読んだ後や、設定の更新後に呼ぶ。
-    /// 既存の履歴は削除しない(削除は `apply_limits`)。
-    pub fn set_limits(&self, max_items: u32, retention_days: u32) {
-        if let Ok(mut g) = self.state.lock()
-            && let State::Ready(a) = &mut *g
-        {
-            a.max_items = max_items;
-            a.retention_days = retention_days;
-        }
-    }
-
     /// 起動時に復号できず読み飛ばした行の数。
     pub fn skipped_count(&self) -> u32 {
         self.skipped
+    }
+
+    /// 内部の状態を保持したスレッドがパニックしたことがあるか。
+    ///
+    /// 履歴は DB が正で、メモリ上の写しは DB の書き込みの後に更新する。そのため、途中でパニックしても
+    /// 写しが古くなるだけで、DB は壊れない。動作は続けるが、画面には保存の異常として知らせる。
+    pub fn is_poisoned(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// 利用できる状態のときだけ `f` を呼ぶ。使えない状態では、その理由のエラーを返し DB に触れない。
@@ -394,7 +425,7 @@ impl HistoryService {
         &self,
         f: impl FnOnce(&mut Active, i64) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let mut guard: MutexGuard<State> = self.state.lock().map_err(lock_err)?;
+        let mut guard = self.lock();
         match &mut *guard {
             State::Ready(a) => f(a, self.clock.now_ms()),
             State::Unavailable(e) => Err(e.clone()),
@@ -402,9 +433,16 @@ impl HistoryService {
     }
 
     /// 履歴を検索する。ピン留めを先頭に、残りは新しい順。空のクエリは全件。
-    pub fn search(&self, query: &str) -> Result<SearchResult, AppError> {
+    /// 一致した全件のうち、`offset` 番目から `limit` 件を返す。
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<SearchResult, AppError> {
+        let q = fold(query);
+        // ロックの中では、必要な件数の写しを作るだけにする
         self.with_active(|a, _| {
-            let q = fold(query);
             let mut hits: Vec<&Entry> = a
                 .entries
                 .iter()
@@ -418,29 +456,46 @@ impl HistoryService {
             });
             Ok(SearchResult {
                 total: a.entries.len() as u32,
-                items: hits.into_iter().map(Entry::summary).collect(),
+                matched: hits.len() as u32,
+                items: hits
+                    .into_iter()
+                    .skip(offset)
+                    .take(limit)
+                    .map(Entry::summary)
+                    .collect(),
             })
         })
     }
 
     pub fn detail(&self, id: i64) -> Result<ClipDetail, AppError> {
-        self.with_active(|a, _| {
+        let (detail, sealed) = self.with_active(|a, _| {
             let e = &a.entries[a.index_of(id)?];
-            let image_png = if e.is_image() {
-                let png = a.repo.load_blob(id)?.ok_or(AppError::NotFound)?;
-                Some(base64_encode(&png))
+            let sealed = if e.is_image() {
+                Some(SealedBlob {
+                    encrypted: a.repo.load_blob_encrypted(id)?.ok_or(AppError::NotFound)?,
+                    cipher: a.repo.cipher(),
+                })
             } else {
                 None
             };
-            Ok(ClipDetail {
+            let detail = ClipDetail {
                 id,
                 kind: e.kind,
                 text: e.text.clone(),
-                image_png,
+                image_png: None,
                 source_app_name: e.source_app.as_ref().map(|s| s.name.clone()),
                 copied_at_ms: e.copied_at_ms,
                 char_count: e.char_count,
-            })
+            };
+            Ok((detail, sealed))
+        })?;
+        // 復号と base64 化は、ロックを離してから行う(最大 10MB)
+        let image_png = sealed
+            .map(|s| s.open(id).map(|png| base64_encode(&png)))
+            .transpose()?;
+        Ok(ClipDetail {
+            image_png,
+            ..detail
         })
     }
 
@@ -476,7 +531,9 @@ impl HistoryService {
     /// 上限を適用すると削除される件数(ピン留めは除く)。削除はしない。
     pub fn count_over_limits(&self, max_items: u32, retention_days: u32) -> Result<u32, AppError> {
         self.with_active(|a, now| {
-            Ok(over_limit_ids(&a.entries, max_items, retention_days, now).len() as u32)
+            Ok(plan_limits(&a.entries, max_items, retention_days, now)
+                .ids
+                .len() as u32)
         })
     }
 
@@ -488,22 +545,54 @@ impl HistoryService {
             a.apply_limits(max_items, retention_days, now)
         })
     }
+
+    /// WAL に残った削除済みの内容を、DB 本体へ書き戻して WAL を空にする(終了時に呼ぶ)。
+    pub fn checkpoint(&self) {
+        let _ = self.with_active(|a, _| {
+            a.repo.checkpoint();
+            Ok(())
+        });
+    }
 }
 
 impl ClipRecorder for HistoryService {
     /// 保存の唯一の入口。空白・サイズ・重複・上限の判定をここで行う。
     fn record(&self, new: NewClip) -> Result<RecordOutcome, AppError> {
-        self.with_active(|a, now| {
-            let NewClip {
-                kind,
-                content,
-                source_app,
-            } = new;
-            let outcome = match content {
-                ClipContent::Text(text) => a.record_text(kind, source_app, text, now)?,
-                ClipContent::Image { png, thumb_png } => {
-                    a.record_image(source_app, png, thumb_png, now)?
+        let NewClip {
+            kind,
+            content,
+            source_app,
+        } = new;
+        // 判定とハッシュ・base64 化は、ロックの外で済ませる
+        let prepared = match content {
+            ClipContent::Text(text) => {
+                if is_blank(&text) {
+                    return Ok(RecordOutcome::Ignored(IgnoreReason::Blank));
                 }
+                if text.len() > MAX_TEXT_BYTES {
+                    return Ok(RecordOutcome::Ignored(IgnoreReason::TooLarge));
+                }
+                let hash = fnv1a_64(text.as_bytes());
+                Prepared::Text(text, hash)
+            }
+            ClipContent::Image { png, thumb_png } => {
+                if png.is_empty() {
+                    return Ok(RecordOutcome::Ignored(IgnoreReason::Blank));
+                }
+                if png.len() > MAX_IMAGE_BYTES {
+                    return Ok(RecordOutcome::Ignored(IgnoreReason::TooLarge));
+                }
+                Prepared::Image(PreparedImage {
+                    hash: fnv1a_64(&png),
+                    thumb_b64: base64_encode(&thumb_png),
+                    png,
+                })
+            }
+        };
+        self.with_active(|a, now| {
+            let outcome = match prepared {
+                Prepared::Text(text, hash) => a.record_text(kind, source_app, text, hash, now)?,
+                Prepared::Image(image) => a.record_image(source_app, image, now)?,
             };
             if matches!(outcome, RecordOutcome::Added(_)) {
                 // 追加は成功しているため、上限処理の失敗は記録の失敗にしない(次の機会に再試行される)
@@ -514,22 +603,45 @@ impl ClipRecorder for HistoryService {
     }
 }
 
+enum Prepared {
+    Text(String, u64),
+    Image(PreparedImage),
+}
+
 impl ClipProvider for HistoryService {
     fn get_content(&self, id: i64) -> Result<ClipContent, AppError> {
-        self.with_active(|a, _| {
+        enum Taken {
+            Text(String),
+            Image {
+                sealed: SealedBlob,
+                thumb_b64: Option<String>,
+            },
+        }
+        let taken = self.with_active(|a, _| {
             let e = &a.entries[a.index_of(id)?];
             if e.is_image() {
-                let png = a.repo.load_blob(id)?.ok_or(AppError::NotFound)?;
-                let thumb_png = e
-                    .thumb_b64
+                Ok(Taken::Image {
+                    sealed: SealedBlob {
+                        encrypted: a.repo.load_blob_encrypted(id)?.ok_or(AppError::NotFound)?,
+                        cipher: a.repo.cipher(),
+                    },
+                    thumb_b64: e.thumb_b64.clone(),
+                })
+            } else {
+                Ok(Taken::Text(e.text.clone().unwrap_or_default()))
+            }
+        })?;
+        match taken {
+            Taken::Text(t) => Ok(ClipContent::Text(t)),
+            Taken::Image { sealed, thumb_b64 } => {
+                let png = sealed.open(id)?;
+                let thumb_png = thumb_b64
                     .as_deref()
                     .and_then(base64_decode)
                     .unwrap_or_default();
                 Ok(ClipContent::Image { png, thumb_png })
-            } else {
-                Ok(ClipContent::Text(e.text.clone().unwrap_or_default()))
             }
-        })
+        }
     }
 
     fn promote(&self, id: i64) -> Result<(), AppError> {
@@ -551,10 +663,13 @@ mod tests {
     use crate::history::clock::FixedClock;
     use crate::storage::repo::{base64_encode, test_support::TempDir};
     use rusqlite::Connection;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const T0: i64 = 1_800_000_000_000;
     const DAY: i64 = 86_400_000;
     const KEY: [u8; 32] = [5u8; 32];
+    /// ページ分けをしない検索(全件)
+    const ALL: usize = 100_000;
 
     fn mem_service(clock: &Arc<FixedClock>) -> HistoryService {
         let conn = Connection::open_in_memory().unwrap();
@@ -597,7 +712,7 @@ mod tests {
     }
 
     fn texts(svc: &HistoryService, q: &str) -> Vec<String> {
-        svc.search(q)
+        svc.search(q, ALL, 0)
             .unwrap()
             .items
             .into_iter()
@@ -605,13 +720,13 @@ mod tests {
             .collect()
     }
 
-    // ---- 記録(US-001) ----
+    // ---- 記録 ----
 
     #[test]
     fn テキストを記録すると追加される() {
         let (_c, svc) = setup();
         let id = added(svc.record(text("hello")).unwrap());
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(r.total, 1);
         assert_eq!(r.items[0].id, id);
         assert_eq!(r.items[0].first_line, "hello");
@@ -630,7 +745,7 @@ mod tests {
                 "{t:?}"
             );
         }
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 0);
     }
 
     #[test]
@@ -643,7 +758,7 @@ mod tests {
                 RecordOutcome::Ignored(IgnoreReason::Blank)
             );
         }
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 0);
     }
 
     #[test]
@@ -666,7 +781,7 @@ mod tests {
             svc.record(text(&over)).unwrap(),
             RecordOutcome::Ignored(IgnoreReason::TooLarge)
         );
-        assert_eq!(svc.search("").unwrap().total, 1);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 1);
     }
 
     #[test]
@@ -691,7 +806,7 @@ mod tests {
         let b = added(svc.record(text("B")).unwrap());
         clock.advance(1000);
         assert_eq!(svc.record(text("A")).unwrap(), RecordOutcome::Promoted(a));
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(r.total, 2);
         assert_eq!(r.items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![a, b]);
         assert_eq!(r.items[0].copied_at_ms, T0 + 2000);
@@ -709,7 +824,7 @@ mod tests {
         svc.record(text("A")).unwrap();
         drop(svc);
         let (svc, _, _) = HistoryService::open(&dir.db_path(), &keys, clock);
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(
             (r.total, r.items[0].id, r.items[0].copied_at_ms),
             (1, a, T0 + 500)
@@ -733,7 +848,7 @@ mod tests {
         drop(svc);
         let (svc, st, msg) = HistoryService::open(&dir.db_path(), &keys, clock);
         assert_eq!((st, msg), (StorageStatus::Ok, None));
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(r.total, 1);
         assert_eq!(r.items[0].first_line, "persist me");
         assert_eq!(r.items[0].source_app_name.as_deref(), Some("Example"));
@@ -751,7 +866,7 @@ mod tests {
         assert!(!bytes.windows(12).any(|w| w == b"plain-dummy-"));
     }
 
-    // ---- 上限(US-005・US-011) ----
+    // ---- 上限 ----
 
     #[test]
     fn 千一件目で最古を削除する() {
@@ -760,7 +875,7 @@ mod tests {
             clock.advance(1);
             svc.record(text(&format!("item-{i}"))).unwrap();
         }
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(r.total, 1000);
         assert!(texts(&svc, "item-0").iter().all(|t| t != "item-0"));
         assert_eq!(r.items.last().unwrap().first_line, "item-1");
@@ -770,7 +885,7 @@ mod tests {
     #[test]
     fn 件数上限の変更を記録時に反映する() {
         let (clock, svc) = setup();
-        svc.set_limits(2, 30);
+        svc.apply_limits(2, 30).unwrap();
         for t in ["a", "b", "c"] {
             clock.advance(1);
             svc.record(text(t)).unwrap();
@@ -782,20 +897,60 @@ mod tests {
     fn 保存期間ちょうどは残り1ミリ秒超過で削除する() {
         let (clock, svc) = setup();
         svc.record(text("old")).unwrap();
+        // 期間内の記録が1件あれば、期間による削除が働く(全件が期間外のときは別のテストで確認する)
         clock.set(T0 + 30 * DAY);
+        svc.record(text("recent")).unwrap();
         assert_eq!(svc.count_over_limits(1000, 30).unwrap(), 0);
         assert_eq!(svc.apply_limits(1000, 30).unwrap(), 0);
-        assert_eq!(svc.search("").unwrap().total, 1);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 2);
         clock.set(T0 + 30 * DAY + 1);
         assert_eq!(svc.count_over_limits(1000, 30).unwrap(), 1);
         assert_eq!(svc.apply_limits(1000, 30).unwrap(), 1);
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(texts(&svc, ""), vec!["recent"]);
+    }
+
+    #[test]
+    fn 全件が保存期間外のとき時計が進んだとみなして削除しない() {
+        let (clock, svc) = setup();
+        svc.record(text("a")).unwrap();
+        clock.advance(1);
+        svc.record(text("b")).unwrap();
+        // 時計が1年進んだ状態。期間内の記録が1件も無いので、期間では消さない
+        clock.set(T0 + 365 * DAY);
+        assert_eq!(svc.count_over_limits(1000, 30).unwrap(), 0);
+        assert_eq!(svc.apply_limits(1000, 30).unwrap(), 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 2);
+    }
+
+    #[test]
+    fn 全件が保存期間外でも件数の上限は適用する() {
+        let (clock, svc) = setup();
+        for t in ["a", "b", "c"] {
+            clock.advance(1);
+            svc.record(text(t)).unwrap();
+        }
+        clock.set(T0 + 365 * DAY);
+        assert_eq!(svc.apply_limits(2, 30).unwrap(), 1);
+        assert_eq!(texts(&svc, ""), vec!["c", "b"]);
+    }
+
+    #[test]
+    fn ピン留めだけが期間内なら時計は正常とみなして古い履歴を削除する() {
+        let (clock, svc) = setup();
+        // 記録のたびに自動で削除されないよう、保存期間を長くしておく
+        svc.apply_limits(1000, 3650).unwrap();
+        svc.record(text("old")).unwrap();
+        clock.set(T0 + 100 * DAY);
+        let pinned = added(svc.record(text("pinned")).unwrap());
+        svc.set_pinned(pinned, true).unwrap();
+        assert_eq!(svc.apply_limits(1000, 30).unwrap(), 1);
+        assert_eq!(texts(&svc, ""), vec!["pinned"]);
     }
 
     #[test]
     fn 記録時に期間を過ぎた履歴が自動で削除される() {
         let (clock, svc) = setup();
-        svc.set_limits(1000, 1);
+        svc.apply_limits(1000, 1).unwrap();
         svc.record(text("old")).unwrap();
         clock.advance(2 * DAY);
         svc.record(text("new")).unwrap();
@@ -809,12 +964,14 @@ mod tests {
         clock.set(T0 - 40 * DAY);
         assert_eq!(svc.count_over_limits(1000, 30).unwrap(), 0);
         assert_eq!(svc.apply_limits(1000, 30).unwrap(), 0);
-        assert_eq!(svc.search("").unwrap().total, 1);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 1);
     }
 
     #[test]
     fn ピン留めは件数と期間の削除対象にならない() {
         let (clock, svc) = setup();
+        // 記録のたびに自動で削除されないよう、保存期間を長くしておく
+        svc.apply_limits(1000, 3650).unwrap();
         let pinned = added(svc.record(text("pinned")).unwrap());
         svc.set_pinned(pinned, true).unwrap();
         clock.advance(1);
@@ -822,9 +979,11 @@ mod tests {
         clock.advance(1);
         svc.record(text("c")).unwrap();
         clock.advance(100 * DAY);
+        svc.record(text("d")).unwrap();
+        // b・c は期間外、d は件数の上限(1)の内側。ピン留めはどちらでも消えない
         assert_eq!(svc.count_over_limits(1, 30).unwrap(), 2);
         assert_eq!(svc.apply_limits(1, 30).unwrap(), 2);
-        assert_eq!(texts(&svc, ""), vec!["pinned"]);
+        assert_eq!(texts(&svc, ""), vec!["pinned", "d"]);
     }
 
     #[test]
@@ -835,12 +994,16 @@ mod tests {
             svc.record(text(t)).unwrap();
         }
         assert_eq!(svc.count_over_limits(2, 30).unwrap(), 2);
-        assert_eq!(svc.search("").unwrap().total, 4, "count は削除しない");
+        assert_eq!(
+            svc.search("", ALL, 0).unwrap().total,
+            4,
+            "count は削除しない"
+        );
         assert_eq!(svc.apply_limits(2, 30).unwrap(), 2);
         assert_eq!(texts(&svc, ""), vec!["d", "c"]);
     }
 
-    // ---- 検索(US-002) ----
+    // ---- 検索 ----
 
     #[test]
     fn 部分一致で検索できる() {
@@ -865,7 +1028,7 @@ mod tests {
     fn 検索は改行をまたいだ本文全体を対象にする() {
         let (_c, svc) = setup();
         svc.record(text("line1\nsecret-word")).unwrap();
-        let r = svc.search("secret-word").unwrap();
+        let r = svc.search("secret-word", ALL, 0).unwrap();
         assert_eq!(r.items.len(), 1);
         assert_eq!(r.items[0].first_line, "line1");
     }
@@ -875,8 +1038,8 @@ mod tests {
         let (_c, svc) = setup();
         svc.record(text("a1")).unwrap();
         svc.record(text("b2")).unwrap();
-        assert_eq!(svc.search("").unwrap().items.len(), 2);
-        let r = svc.search("a1").unwrap();
+        assert_eq!(svc.search("", ALL, 0).unwrap().items.len(), 2);
+        let r = svc.search("a1", ALL, 0).unwrap();
         assert_eq!((r.items.len(), r.total), (1, 2));
     }
 
@@ -893,17 +1056,22 @@ mod tests {
         assert_eq!(texts(&svc, ""), vec!["c", "a", "d", "b"]);
     }
 
-    #[test]
-    fn 千件各1KBでも検索できる() {
-        let (clock, svc) = setup();
+    /// 1KB の本文を 1,000 件入れる(検索の速度の確認用)。
+    fn fill_1000(clock: &FixedClock, svc: &HistoryService) {
         for i in 0..1000 {
             clock.advance(1);
             svc.record(text(&format!("{i:04}-{}", "x".repeat(1024))))
                 .unwrap();
         }
-        let r = svc.search("0999-").unwrap();
+    }
+
+    #[test]
+    fn 千件各1KBでも検索できる() {
+        let (clock, svc) = setup();
+        fill_1000(&clock, &svc);
+        let r = svc.search("0999-", ALL, 0).unwrap();
         assert_eq!((r.total, r.items.len()), (1000, 1));
-        assert_eq!(svc.search("").unwrap().items.len(), 1000);
+        assert_eq!(svc.search("", ALL, 0).unwrap().items.len(), 1000);
     }
 
     /// release ビルドでの計測用: `cargo test --release -- --ignored`
@@ -911,13 +1079,9 @@ mod tests {
     #[ignore]
     fn 千件各1KBの検索が200ms以内に終わる() {
         let (clock, svc) = setup();
-        for i in 0..1000 {
-            clock.advance(1);
-            svc.record(text(&format!("{i:04}-{}", "x".repeat(1024))))
-                .unwrap();
-        }
+        fill_1000(&clock, &svc);
         let start = std::time::Instant::now();
-        let r = svc.search("XXXX").unwrap();
+        let r = svc.search("XXXX", ALL, 0).unwrap();
         let elapsed = start.elapsed();
         assert_eq!(r.items.len(), 1000);
         assert!(elapsed.as_millis() < 200, "{elapsed:?}");
@@ -930,7 +1094,7 @@ mod tests {
         let (_c, svc) = setup();
         let id = added(svc.record(text("a")).unwrap());
         svc.delete(id).unwrap();
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 0);
         assert_eq!(svc.delete(id), Err(AppError::NotFound));
     }
 
@@ -940,7 +1104,7 @@ mod tests {
         let id = added(svc.record(text("a")).unwrap());
         svc.set_pinned(id, true).unwrap();
         svc.delete(id).unwrap();
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 0);
     }
 
     #[test]
@@ -950,7 +1114,7 @@ mod tests {
         svc.record(text("b")).unwrap();
         svc.set_pinned(id, true).unwrap();
         assert_eq!(svc.clear().unwrap(), 2);
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 0);
         assert_eq!(svc.clear().unwrap(), 0);
     }
 
@@ -959,9 +1123,9 @@ mod tests {
         let (_c, svc) = setup();
         let id = added(svc.record(text("a")).unwrap());
         svc.set_pinned(id, true).unwrap();
-        assert!(svc.search("").unwrap().items[0].pinned);
+        assert!(svc.search("", ALL, 0).unwrap().items[0].pinned);
         svc.set_pinned(id, false).unwrap();
-        assert!(!svc.search("").unwrap().items[0].pinned);
+        assert!(!svc.search("", ALL, 0).unwrap().items[0].pinned);
         assert_eq!(svc.set_pinned(id + 99, true), Err(AppError::NotFound));
     }
 
@@ -984,7 +1148,7 @@ mod tests {
         svc.record(text("B")).unwrap();
         clock.advance(100);
         svc.promote(a).unwrap();
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(
             (r.total, r.items[0].id, r.items[0].copied_at_ms),
             (2, a, T0 + 200)
@@ -1004,14 +1168,14 @@ mod tests {
         assert_eq!(svc.detail(id + 1), Err(AppError::NotFound));
     }
 
-    // ---- 画像(US-012) ----
+    // ---- 画像 ----
 
     #[test]
     fn 画像を記録しサムネイルと本体を取得できる() {
         let (_c, svc) = setup();
         let png = vec![0x89, b'P', b'N', b'G', 9, 9, 9];
         let id = added(svc.record(image(png.clone())).unwrap());
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!(r.items[0].kind, ClipKind::Image);
         assert_eq!(
             r.items[0].thumb_png.as_deref(),
@@ -1043,7 +1207,7 @@ mod tests {
             svc.record(image(over)).unwrap(),
             RecordOutcome::Ignored(IgnoreReason::TooLarge)
         );
-        assert_eq!(svc.search("").unwrap().total, 1);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 1);
     }
 
     #[test]
@@ -1057,7 +1221,7 @@ mod tests {
             svc.record(image(vec![1, 1, 1])).unwrap(),
             RecordOutcome::Promoted(a)
         );
-        assert_eq!(svc.search("").unwrap().total, 2);
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 2);
         assert!(matches!(
             svc.record(image(vec![2, 2, 2])).unwrap(),
             RecordOutcome::Added(_)
@@ -1076,14 +1240,16 @@ mod tests {
     #[test]
     fn 画像も検索語があると一致せず_上限と削除の対象になる() {
         let (clock, svc) = setup();
+        svc.apply_limits(1000, 3650).unwrap();
         let id = added(svc.record(image(vec![1, 2])).unwrap());
         assert!(texts(&svc, "a").is_empty());
         clock.advance(31 * DAY);
+        svc.record(text("recent")).unwrap();
         assert_eq!(svc.apply_limits(1000, 30).unwrap(), 1);
         assert_eq!(svc.get_content(id), Err(AppError::NotFound));
         let id2 = added(svc.record(image(vec![3, 4])).unwrap());
         svc.delete(id2).unwrap();
-        assert_eq!(svc.search("").unwrap().total, 0);
+        assert_eq!(texts(&svc, ""), vec!["recent"]);
     }
 
     #[test]
@@ -1101,7 +1267,7 @@ mod tests {
         );
     }
 
-    // ---- 起動時の状態判定(US-006) ----
+    // ---- 起動時の状態判定 ----
 
     #[test]
     fn dbも鍵も無いとき鍵を生成してdbを作る() {
@@ -1144,7 +1310,7 @@ mod tests {
         assert!(msg.is_some());
         assert!(!dir.db_path().exists());
         assert_eq!(*keys.save_count.lock().unwrap(), 0);
-        assert_eq!(svc.search("").err(), Some(AppError::KeyUnavailable));
+        assert_eq!(svc.search("", ALL, 0).err(), Some(AppError::KeyUnavailable));
     }
 
     fn make_db(dir: &TempDir, keys: &FakeKeyStore) -> Vec<u8> {
@@ -1188,7 +1354,7 @@ mod tests {
         assert_eq!(*failing.save_count.lock().unwrap(), 0);
         assert!(failing.key.lock().unwrap().is_none());
         // 全メソッドが KeyUnavailable を返す
-        assert_eq!(svc.search("").err(), Some(AppError::KeyUnavailable));
+        assert_eq!(svc.search("", ALL, 0).err(), Some(AppError::KeyUnavailable));
         assert_eq!(svc.record(text("x")), Err(AppError::KeyUnavailable));
         assert_eq!(svc.detail(1), Err(AppError::KeyUnavailable));
         assert_eq!(svc.delete(1), Err(AppError::KeyUnavailable));
@@ -1224,7 +1390,7 @@ mod tests {
         let (svc, st, msg) = HistoryService::open(&dir.db_path(), &other, FixedClock::new(T0));
         assert_eq!(st, StorageStatus::KeyMismatch);
         assert!(msg.is_some());
-        assert_eq!(svc.search("").err(), Some(AppError::KeyMismatch));
+        assert_eq!(svc.search("", ALL, 0).err(), Some(AppError::KeyMismatch));
         assert_eq!(svc.record(text("x")), Err(AppError::KeyMismatch));
         assert_eq!(*other.save_count.lock().unwrap(), 0);
         drop(svc);
@@ -1250,7 +1416,7 @@ mod tests {
         let (svc, st, _) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
         assert_eq!(st, StorageStatus::Ok);
         assert_eq!(svc.skipped_count(), 1);
-        let r = svc.search("").unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
         assert_eq!((r.total, r.items[0].id), (1, good));
         drop(svc);
         let conn = Connection::open(dir.db_path()).unwrap();
@@ -1273,7 +1439,10 @@ mod tests {
         let (svc, st, msg) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
         assert_eq!(st, StorageStatus::Error);
         assert!(msg.is_some());
-        assert!(matches!(svc.search("").err(), Some(AppError::Storage(_))));
+        assert!(matches!(
+            svc.search("", ALL, 0).err(),
+            Some(AppError::Storage(_))
+        ));
         drop(svc);
         assert_eq!(std::fs::read(dir.db_path()).unwrap(), before);
     }
@@ -1301,5 +1470,197 @@ mod tests {
         let (svc, st, _) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
         assert_eq!(st, StorageStatus::Ok);
         svc.record(text("a")).unwrap();
+    }
+
+    // ---- 一覧のページ分けと要約 ----
+
+    #[test]
+    fn 検索はoffsetからlimit件を返しmatchedは一致の全件数になる() {
+        let (clock, svc) = setup();
+        for i in 0..10 {
+            clock.advance(1);
+            svc.record(text(&format!("item-{i}"))).unwrap();
+        }
+        svc.record(text("other")).unwrap();
+        let r = svc.search("item", 4, 3).unwrap();
+        assert_eq!((r.total, r.matched, r.items.len()), (11, 10, 4));
+        // 新しい順の 4〜7 番目(item-6 から item-3)
+        assert_eq!(r.items[0].first_line, "item-6");
+        assert_eq!(r.items[3].first_line, "item-3");
+        let r = svc.search("item", 4, 8).unwrap();
+        assert_eq!((r.matched, r.items.len()), (10, 2));
+        let r = svc.search("item", 4, 50).unwrap();
+        assert_eq!((r.matched, r.items.len()), (10, 0));
+    }
+
+    #[test]
+    fn 要約は先頭の非空の行と追加の行数を返す() {
+        let (_c, svc) = setup();
+        svc.record(text("\n \nfoo\nbar\n\nbaz\n")).unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
+        assert_eq!(r.items[0].first_line, "foo");
+        assert_eq!(r.items[0].extra_lines, 3);
+    }
+
+    #[test]
+    fn 画像の要約は追加の行数が0でサムネイルを返す() {
+        let (_c, svc) = setup();
+        svc.record(image(vec![1, 2, 3])).unwrap();
+        let r = svc.search("", ALL, 0).unwrap();
+        assert_eq!(r.items[0].extra_lines, 0);
+        assert!(r.items[0].thumb_png.is_some());
+    }
+
+    // ---- 画像のハッシュ ----
+
+    #[test]
+    fn 画像の重複判定用ハッシュは固定のアルゴリズムで保存される() {
+        let dir = TempDir::new();
+        let keys = FakeKeyStore::with_key(KEY);
+        let clock = FixedClock::new(T0);
+        let (svc, _, _) = HistoryService::open(&dir.db_path(), &keys, clock);
+        let png = vec![9u8, 8, 7, 6];
+        svc.record(image(png.clone())).unwrap();
+        drop(svc);
+        let repo = Repo::new(Connection::open(dir.db_path()).unwrap(), Cipher::new(KEY));
+        let rows = repo.load_all().unwrap().0;
+        // FNV-1a 64bit の値(版や実行をまたいでも変わらない)
+        assert_eq!(rows[0].payload.blob_hash, Some(0xf248_a2ba_2083_584d));
+    }
+
+    // ---- 内部状態の異常 ----
+
+    #[test]
+    fn 内部状態を持つスレッドがパニックしても動作を続けpoisonedを返す() {
+        let (_c, svc) = setup();
+        svc.record(text("before")).unwrap();
+        assert!(!svc.is_poisoned());
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = svc.state.lock().unwrap();
+            panic!("テスト用のパニック");
+        }));
+        assert!(svc.is_poisoned());
+        // DB が正なので、動作は続けられる
+        assert_eq!(texts(&svc, ""), vec!["before"]);
+        svc.record(text("after")).unwrap();
+        assert_eq!(svc.search("", ALL, 0).unwrap().total, 2);
+    }
+
+    // ---- 削除後の WAL ----
+
+    fn wal_len(dir: &TempDir) -> u64 {
+        std::fs::metadata(dir.0.join("nuebako.db-wal"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn 削除したあとWALに内容が残らない() {
+        let dir = TempDir::new();
+        let (svc, _, _) = HistoryService::open(
+            &dir.db_path(),
+            &FakeKeyStore::with_key(KEY),
+            FixedClock::new(T0),
+        );
+        let id = added(svc.record(text(&"x".repeat(5000))).unwrap());
+        assert!(wal_len(&dir) > 0, "削除の前は WAL に書き込みがある");
+        svc.delete(id).unwrap();
+        assert_eq!(wal_len(&dir), 0, "単体削除のあと");
+        svc.record(text(&"y".repeat(5000))).unwrap();
+        svc.clear().unwrap();
+        assert_eq!(wal_len(&dir), 0, "全削除のあと");
+    }
+
+    #[test]
+    fn 上限による削除のあともWALに内容が残らない() {
+        let dir = TempDir::new();
+        let clock = FixedClock::new(T0);
+        let (svc, _, _) =
+            HistoryService::open(&dir.db_path(), &FakeKeyStore::with_key(KEY), clock.clone());
+        for t in ["a", "b", "c"] {
+            clock.advance(1);
+            svc.record(text(&format!("{t}{}", "x".repeat(5000))))
+                .unwrap();
+        }
+        assert_eq!(svc.apply_limits(1, 30).unwrap(), 2);
+        assert_eq!(wal_len(&dir), 0);
+    }
+
+    #[test]
+    fn 終了時のcheckpointでWALが空になる() {
+        let dir = TempDir::new();
+        let (svc, _, _) = HistoryService::open(
+            &dir.db_path(),
+            &FakeKeyStore::with_key(KEY),
+            FixedClock::new(T0),
+        );
+        svc.record(text(&"x".repeat(5000))).unwrap();
+        assert!(wal_len(&dir) > 0);
+        svc.checkpoint();
+        assert_eq!(wal_len(&dir), 0);
+    }
+
+    // ---- ファイルの権限 ----
+
+    #[cfg(unix)]
+    #[test]
+    fn 保存ファイルは所有者だけが読み書きできる() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let path = dir.0.join("data");
+        let db = path.join("nuebako.db");
+        let (svc, st, _) =
+            HistoryService::open(&db, &FakeKeyStore::with_key(KEY), FixedClock::new(T0));
+        assert_eq!(st, StorageStatus::Ok);
+        svc.record(text("a")).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o700);
+        assert_eq!(mode(&db), 0o600);
+        assert_eq!(mode(&path.join("nuebako.db-wal")), 0o600);
+        assert_eq!(mode(&path.join("nuebako.db-shm")), 0o600);
+    }
+
+    // ---- key_check の自己修復 ----
+
+    fn delete_key_check(dir: &TempDir) {
+        let conn = Connection::open(dir.db_path()).unwrap();
+        conn.execute("DELETE FROM meta WHERE key='key_check'", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn key_checkが無く履歴も空のdbは作り直して開ける() {
+        let dir = TempDir::new();
+        let keys = FakeKeyStore::with_key(KEY);
+        let (svc, _, _) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
+        drop(svc);
+        delete_key_check(&dir);
+        let (svc, st, msg) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
+        assert_eq!((st, msg), (StorageStatus::Ok, None));
+        svc.record(text("a")).unwrap();
+        drop(svc);
+        // 修復した key_check で、次の起動も開ける。違う鍵は拒否される
+        let (_svc, st, _) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
+        assert_eq!(st, StorageStatus::Ok);
+        let other = FakeKeyStore::with_key([9u8; 32]);
+        let (_svc, st, _) = HistoryService::open(&dir.db_path(), &other, FixedClock::new(T0));
+        assert_eq!(st, StorageStatus::KeyMismatch);
+    }
+
+    #[test]
+    fn key_checkが無く履歴がある場合は読み込まず書き込まない() {
+        let dir = TempDir::new();
+        let keys = FakeKeyStore::with_key(KEY);
+        let (svc, _, _) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
+        svc.record(text("existing-dummy")).unwrap();
+        drop(svc);
+        delete_key_check(&dir);
+        let before = std::fs::read(dir.db_path()).unwrap();
+        let (svc, st, msg) = HistoryService::open(&dir.db_path(), &keys, FixedClock::new(T0));
+        assert_eq!(st, StorageStatus::Error);
+        assert!(msg.is_some());
+        assert!(matches!(svc.record(text("x")), Err(AppError::Storage(_))));
+        drop(svc);
+        assert_eq!(std::fs::read(dir.db_path()).unwrap(), before);
     }
 }

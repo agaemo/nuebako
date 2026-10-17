@@ -29,30 +29,55 @@ fn notify_changed(app: &AppHandle) {
     let _ = app.emit(EVENT_HISTORY_CHANGED, ());
 }
 
-fn list_clips_impl(h: &HistoryService, query: &str, req_id: u64) -> Result<ClipPage, AppError> {
+/// 1回に返す件数の範囲。画面は 50 件ずつ読み込む。
+const MIN_LIMIT: u32 = 1;
+const MAX_LIMIT: u32 = 200;
+
+/// `limit` を 1〜200 に丸める(0 や極端に大きい値で、IPC の応答が空になったり、巨大になったりしないように)。
+fn clamp_limit(limit: u32) -> usize {
+    limit.clamp(MIN_LIMIT, MAX_LIMIT) as usize
+}
+
+fn list_clips_impl(
+    h: &HistoryService,
+    query: &str,
+    req_id: u64,
+    limit: u32,
+    offset: u32,
+) -> Result<ClipPage, AppError> {
     if query.chars().count() > MAX_QUERY_CHARS {
         return Err(AppError::validation("query", "検索語が長すぎます"));
     }
-    let r = h.search(query)?;
+    let r = h.search(query, clamp_limit(limit), offset as usize)?;
     Ok(ClipPage {
         req_id,
         total: r.total,
+        matched: r.matched,
         items: r.items,
     })
 }
 
-#[tauri::command]
-pub fn list_clips(app: AppHandle, query: String, req_id: u64) -> Result<ClipPage, AppError> {
+/// 履歴を検索して、`offset` 番目から `limit` 件を返す。
+/// 検索と、サムネイルを含む応答の組み立てがあるため、メインスレッドで動かさない(`async`)。
+#[tauri::command(async)]
+pub fn list_clips(
+    app: AppHandle,
+    query: String,
+    req_id: u64,
+    limit: u32,
+    offset: u32,
+) -> Result<ClipPage, AppError> {
     let h = history(&app)?;
-    list_clips_impl(&h, &query, req_id)
+    list_clips_impl(&h, &query, req_id, limit, offset)
 }
 
-#[tauri::command]
+/// 画像は復号と base64 化に時間がかかるため、メインスレッドで動かさない(`async`)。
+#[tauri::command(async)]
 pub fn get_clip_detail(app: AppHandle, id: i64) -> Result<ClipDetail, AppError> {
     history(&app)?.detail(id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_clip(app: AppHandle, id: i64) -> Result<(), AppError> {
     history(&app)?.delete(id)?;
     notify_changed(&app);
@@ -60,14 +85,14 @@ pub fn delete_clip(app: AppHandle, id: i64) -> Result<(), AppError> {
 }
 
 /// 全件を削除し、削除した件数を返す。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn clear_history(app: AppHandle) -> Result<u32, AppError> {
     let n = history(&app)?.clear()?;
     notify_changed(&app);
     Ok(n)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_pinned(app: AppHandle, id: i64, pinned: bool) -> Result<(), AppError> {
     history(&app)?.set_pinned(id, pinned)?;
     notify_changed(&app);
@@ -106,48 +131,65 @@ mod tests {
     fn req_idをそのまま返す() {
         let h = service();
         add(&h, "a");
-        let page = list_clips_impl(&h, "", 12345).unwrap();
+        let page = list_clips_impl(&h, "", 12345, 50, 0).unwrap();
         assert_eq!(page.req_id, 12345);
-        assert_eq!(page.total, 1);
-        let page = list_clips_impl(&h, "zzz", u64::MAX).unwrap();
+        let page = list_clips_impl(&h, "zzz", u64::MAX, 50, 0).unwrap();
         assert_eq!(
-            (page.req_id, page.total, page.items.len()),
-            (u64::MAX, 1, 0)
+            (page.req_id, page.total, page.matched, page.items.len()),
+            (u64::MAX, 1, 0, 0)
         );
     }
 
     #[test]
-    fn first_lineは最初の改行までになる() {
-        let h = service();
-        add(&h, "one\ntwo\nthree");
-        let page = list_clips_impl(&h, "", 1).unwrap();
-        assert_eq!(page.items[0].first_line, "one");
+    fn limitは1から200に丸める() {
+        assert_eq!(clamp_limit(0), 1);
+        assert_eq!(clamp_limit(1), 1);
+        assert_eq!(clamp_limit(50), 50);
+        assert_eq!(clamp_limit(200), 200);
+        assert_eq!(clamp_limit(201), 200);
+        assert_eq!(clamp_limit(u32::MAX), 200);
     }
 
     #[test]
-    fn first_lineは最大200文字でサロゲートペアの途中で切らない() {
+    fn offsetからlimit件を返しmatchedは一致した全件数になる() {
         let h = service();
-        add(&h, &format!("{}😀{}", "a".repeat(199), "b".repeat(50)));
-        let page = list_clips_impl(&h, "", 1).unwrap();
-        let line = &page.items[0].first_line;
-        assert_eq!(line.chars().count(), 200);
-        assert!(line.ends_with('😀'));
-        assert!(page.items[0].char_count > 200);
+        for i in 0..7 {
+            add(&h, &format!("item-{i}"));
+        }
+        add(&h, "other");
+        let page = list_clips_impl(&h, "item", 1, 3, 2).unwrap();
+        assert_eq!((page.total, page.matched, page.items.len()), (8, 7, 3));
+        let page = list_clips_impl(&h, "item", 1, 3, 6).unwrap();
+        assert_eq!((page.matched, page.items.len()), (7, 1));
+        let page = list_clips_impl(&h, "item", 1, 3, 100).unwrap();
+        assert_eq!((page.matched, page.items.len()), (7, 0));
+    }
+
+    #[test]
+    fn limitが0でも1件は返す() {
+        let h = service();
+        add(&h, "a");
+        add(&h, "b");
+        assert_eq!(list_clips_impl(&h, "", 1, 0, 0).unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn 応答のキーはsnake_caseで一致件数と追加の行数を含む() {
+        let h = service();
+        add(&h, "one\ntwo\nthree");
+        let json = serde_json::to_value(list_clips_impl(&h, "", 9, 50, 0).unwrap()).unwrap();
+        assert_eq!(json["req_id"], 9);
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["matched"], 1);
+        assert_eq!(json["items"][0]["first_line"], "one");
+        assert_eq!(json["items"][0]["extra_lines"], 2);
     }
 
     #[test]
     fn 長すぎる検索語は検証エラーになる() {
         let h = service();
         let q = "a".repeat(MAX_QUERY_CHARS + 1);
-        let err = list_clips_impl(&h, &q, 1).unwrap_err();
+        let err = list_clips_impl(&h, &q, 1, 50, 0).unwrap_err();
         assert_eq!(err.code(), "validation");
-    }
-
-    #[test]
-    fn 存在しないidはnot_foundになる() {
-        let h = service();
-        assert_eq!(h.detail(999).unwrap_err().code(), "not_found");
-        assert_eq!(h.delete(999).unwrap_err().code(), "not_found");
-        assert_eq!(h.set_pinned(999, true).unwrap_err().code(), "not_found");
     }
 }

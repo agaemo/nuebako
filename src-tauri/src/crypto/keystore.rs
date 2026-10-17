@@ -1,4 +1,4 @@
-//! 鍵の保管。OS のキーチェーンを使う実装は track-store が書く。
+//! 暗号鍵の保管。鍵は履歴のファイルとは別に OS のキーチェーンへ置く。DB のファイルだけを持ち出されても、履歴を読めないようにするため。
 
 use crate::crypto::cipher::Cipher;
 use crate::error::AppError;
@@ -25,6 +25,18 @@ pub fn load_or_create(store: &dyn KeyStore) -> Result<[u8; 32], AppError> {
 /// キーチェーンに保存するときのサービス名とユーザー名。
 const SERVICE: &str = "io.github.agaemo.nuebako";
 const USER: &str = "history-encryption-key";
+
+/// 資格情報を作るときの追加指定。
+///
+/// Windows の資格情報マネージャーは、既定ではドメイン環境でローミングされる永続性(Enterprise)で保存する。
+/// 鍵が別の端末へ複製されうる一方、履歴の DB はこの端末のローカルフォルダにしか無く、保存先と寿命が食い違う。
+/// そのため、この端末の中だけに残る `Local` を指定する。macOS の Keychain に該当する指定は無い。
+fn credential_modifiers() -> std::collections::HashMap<&'static str, &'static str> {
+    #[cfg(windows)]
+    return std::collections::HashMap::from([("persistence", "Local")]);
+    #[cfg(not(windows))]
+    std::collections::HashMap::new()
+}
 
 /// OS のキーチェーン(macOS の Keychain、Windows の資格情報マネージャー)に鍵を保存する実装。
 /// keyring-core の既定ストアを初期化して `Entry` を使うだけの薄いラッパー。
@@ -74,7 +86,8 @@ impl KeychainKeyStore {
 
     fn entry(&self) -> Result<keyring_core::Entry, AppError> {
         Self::init_store()?;
-        keyring_core::Entry::new(&self.service, &self.user).map_err(|_| AppError::KeyUnavailable)
+        keyring_core::Entry::new_with_modifiers(&self.service, &self.user, &credential_modifiers())
+            .map_err(|_| AppError::KeyUnavailable)
     }
 
     /// テスト用: 保存した鍵を削除する。
@@ -176,6 +189,18 @@ mod tests {
         assert_eq!(load_or_create(&store), Err(AppError::KeyUnavailable));
         assert_eq!(*store.save_count.lock().unwrap(), 0);
         assert!(store.key.lock().unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windowsでは資格情報の永続性をローカルにする() {
+        assert_eq!(credential_modifiers().get("persistence"), Some(&"Local"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows以外では追加の指定をしない() {
+        assert!(credential_modifiers().is_empty());
     }
 
     /// 実機のキーチェーンに触れるため、手動で実行する(`cargo test -- --ignored`)。

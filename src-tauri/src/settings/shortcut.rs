@@ -81,6 +81,22 @@ pub fn change_shortcut(
     }
 }
 
+/// 起動時に、保存済みのショートカットを登録する。他のアプリと競合して登録できないときは、既定のショートカットを
+/// 登録して、設定も既定に更新する。設定を旧のままにすると、画面には登録できなかった値が表示され続け、
+/// 実際に有効なショートカットと食い違うため。既定に戻したときは `true` を返す。
+pub fn register_at_startup(
+    registrar: &dyn ShortcutRegistrar,
+    store: &SettingsStore,
+) -> Result<bool, AppError> {
+    if registrar.register(&store.get().shortcut).is_ok() {
+        return Ok(false);
+    }
+    let default = Settings::default().shortcut;
+    registrar.register(&default)?;
+    store.save_shortcut(&default)?;
+    Ok(true)
+}
+
 /// 入力待ちの間だけ、いまのショートカットを一時的に解除する。
 /// 押したキーが、グローバルショートカットに奪われず、画面に届くようにするため。
 /// 解除したことを `suspended` に記録する(2回呼んでも解除は1回)。
@@ -241,6 +257,58 @@ mod tests {
             ]
         );
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn 起動時に保存済みのショートカットを登録できたらそのまま使う() {
+        let (store, path) = new_store("startup-ok");
+        store.save_shortcut("Alt+Shift+K").unwrap();
+        let fake = Fake::default();
+        assert_eq!(register_at_startup(&fake, &store), Ok(false));
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec!["register Alt+Shift+K".to_string()]
+        );
+        assert_eq!(store.get().shortcut, "Alt+Shift+K");
+        assert_eq!(SettingsStore::load(path).get().shortcut, "Alt+Shift+K");
+    }
+
+    #[test]
+    fn 起動時に登録できなかったとき既定を登録して設定も既定に更新する() {
+        let (store, path) = new_store("startup-fallback");
+        store.save_shortcut("Alt+Shift+K").unwrap();
+        let fake = Fake {
+            fail_register: vec!["Alt+Shift+K".into()],
+            ..Default::default()
+        };
+        assert_eq!(register_at_startup(&fake, &store), Ok(true));
+        let default = Settings::default().shortcut;
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![
+                "register Alt+Shift+K".to_string(),
+                format!("register {default}")
+            ]
+        );
+        assert_eq!(store.get().shortcut, default);
+        assert_eq!(
+            SettingsStore::load(path).get().shortcut,
+            default,
+            "ファイルにも保存される"
+        );
+    }
+
+    #[test]
+    fn 既定も登録できないとき設定は変えずにエラーを返す() {
+        let (store, _) = new_store("startup-both-fail");
+        store.save_shortcut("Alt+Shift+K").unwrap();
+        let default = Settings::default().shortcut;
+        let fake = Fake {
+            fail_register: vec!["Alt+Shift+K".into(), default],
+            ..Default::default()
+        };
+        assert!(register_at_startup(&fake, &store).is_err());
+        assert_eq!(store.get().shortcut, "Alt+Shift+K");
     }
 
     // 入力待ちの間だけ今のショートカットを解除し、終わったら必ず戻す(押したキーを画面が受け取れるようにする)

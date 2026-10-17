@@ -1,5 +1,6 @@
 //! トレイアイコンとメニュー(履歴を開く / 設定 / 終了)と、記録したときのアイコンの切り替え。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tauri::AppHandle;
@@ -62,12 +63,58 @@ fn set_icon(app: &AppHandle, bytes: &'static [u8]) {
     }
 }
 
+/// 記録のたびに増える番号。連続してコピーしたとき、先のスレッドが、後の切り替えを早く元に戻さないために使う。
+#[derive(Default)]
+struct FlashGeneration(AtomicU64);
+
+impl FlashGeneration {
+    /// 新しい切り替えを始める。戻り値の番号を、`is_latest` で確かめる。
+    fn begin(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// その切り替えのあとに、別の切り替えが始まっていないか。
+    fn is_latest(&self, generation: u64) -> bool {
+        self.0.load(Ordering::SeqCst) == generation
+    }
+}
+
+static FLASH_GENERATION: FlashGeneration = FlashGeneration(AtomicU64::new(0));
+
 /// 記録した合図として、アイコンを約 600ms だけ切り替える(通知は出さない)。
+/// 600ms の間にもう一度呼ばれたら、最後の呼び出しから 600ms 後に元へ戻す。
 pub fn flash(app: &AppHandle) {
     set_icon(app, ACTIVE);
+    let generation = FLASH_GENERATION.begin();
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(FLASH);
-        set_icon(&app, NORMAL);
+        if FLASH_GENERATION.is_latest(generation) {
+            set_icon(&app, NORMAL);
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 切り替えが1回だけなら元に戻す() {
+        let g = FlashGeneration::default();
+        let first = g.begin();
+        assert!(g.is_latest(first));
+    }
+
+    #[test]
+    fn 連続して切り替えたとき先の切り替えは元に戻さない() {
+        let g = FlashGeneration::default();
+        let first = g.begin();
+        let second = g.begin();
+        assert!(
+            !g.is_latest(first),
+            "先のスレッドが後の表示を早く戻してはいけない"
+        );
+        assert!(g.is_latest(second));
+    }
 }

@@ -22,9 +22,6 @@ pub enum AppError {
     NotFound,
     /// クリップボードの読み書きの失敗
     Clipboard(String),
-    /// OS の権限が無い。フロントエンドの `permission_denied` と対応する予約で、現在は発生させていない
-    #[allow(dead_code)]
-    PermissionDenied,
     Internal(String),
 }
 
@@ -39,7 +36,6 @@ impl AppError {
             AppError::ShortcutConflict(_) => "shortcut_conflict",
             AppError::NotFound => "not_found",
             AppError::Clipboard(_) => "clipboard",
-            AppError::PermissionDenied => "permission_denied",
             AppError::Internal(_) => "internal",
         }
     }
@@ -58,7 +54,6 @@ impl AppError {
             AppError::ShortcutConflict(m) => format!("ショートカットを登録できません: {m}"),
             AppError::NotFound => "対象の履歴が見つかりません".to_string(),
             AppError::Clipboard(m) => format!("クリップボードの操作でエラーが起きました: {m}"),
-            AppError::PermissionDenied => "OS の権限が必要です".to_string(),
             AppError::Internal(m) => format!("内部エラー: {m}"),
         }
     }

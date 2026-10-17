@@ -7,32 +7,50 @@ use crate::domain::dto::SettingsPatch;
 use crate::domain::settings::Settings;
 use crate::error::AppError;
 use crate::settings::validate::{dedup_excluded_apps, validate_accelerator, validate_limits};
+use crate::storage::perms;
 
 pub struct SettingsStore {
     path: PathBuf,
     current: Mutex<Settings>,
+    /// 設定ファイルを読めず、既定値で起動した(画面に知らせるため)
+    recovered: bool,
 }
 
 impl SettingsStore {
-    /// `path`(settings.json)から読み込む。無ければ既定値。壊れていれば既定値で起動し、壊れたファイルを `.bak` に退避する。
+    /// `path`(settings.json)から読み込む。無ければ既定値(初回の起動なので、異常ではない)。
+    /// 壊れていれば既定値で起動し、壊れたファイルを `.bak` に退避する。
+    /// 読めなかったときは `recovered` を立てる。除外アプリが黙って既定に戻ったことを、利用者が知れるようにするため。
     pub fn load(path: PathBuf) -> Self {
-        let settings = match std::fs::read_to_string(&path) {
+        let (settings, recovered) = match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<Settings>(&text) {
-                Ok(s) => s,
+                Ok(s) => (s, false),
                 Err(_) => {
                     // 壊れたファイルは消さずに退避する(退避に失敗しても既定値で起動する)
                     let mut bak = path.clone().into_os_string();
                     bak.push(".bak");
                     let _ = std::fs::rename(&path, PathBuf::from(bak));
-                    Settings::default()
+                    (Settings::default(), true)
                 }
             },
-            Err(_) => Settings::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), false),
+            Err(_) => (Settings::default(), true),
         };
         Self {
             path,
             current: Mutex::new(settings),
+            recovered,
         }
+    }
+
+    /// 設定ファイルを読めず、既定値で起動したか。
+    pub fn recovered(&self) -> bool {
+        self.recovered
+    }
+
+    /// 内部の状態を保持したスレッドがパニックしたことがあるか。
+    /// 設定は丸ごと置き換える値なので、パニックしても壊れた状態は残らない。履歴と同じく、動作は続けて異常として知らせる。
+    pub fn is_poisoned(&self) -> bool {
+        self.current.is_poisoned()
     }
 
     pub fn get(&self) -> Settings {
@@ -42,19 +60,35 @@ impl SettingsStore {
             .clone()
     }
 
-    /// 一時ファイルに書いてから置き換える(書き込み途中で壊れないように)。
+    /// 一時ファイルに書いて `sync_all` してから置き換える。書き込み途中や、電源断のあとに、
+    /// 空や半端なファイルが残らないようにするため。
     fn write(&self, settings: &Settings) -> Result<(), AppError> {
+        use std::io::Write;
         let io = |_: std::io::Error| AppError::Storage("設定ファイルを保存できません".to_string());
         let json = serde_json::to_string_pretty(settings)
             .map_err(|_| AppError::Internal("設定を変換できません".to_string()))?;
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
+            perms::restrict_dir(dir);
         }
         let mut tmp = self.path.clone().into_os_string();
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
-        std::fs::write(&tmp, json).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            // 作成した時点から所有者だけが読めるようにする(あとから絞ると、その間は読める)
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).map_err(io)?;
+        file.write_all(json.as_bytes()).map_err(io)?;
+        file.sync_all().map_err(io)?;
+        drop(file);
+        std::fs::rename(&tmp, &self.path).map_err(io)?;
+        perms::restrict_file(&self.path);
+        Ok(())
     }
 
     /// 部分更新する。不正な値があれば何も保存しない。
@@ -223,5 +257,82 @@ mod tests {
         let s = SettingsStore::load(path).get();
         assert_eq!(s.max_items, 42);
         assert_eq!(s.retention_days, 30);
+    }
+
+    #[test]
+    fn 壊れたJSONで起動したときrecoveredが立つ() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "{ これはJSONではない").unwrap();
+        assert!(SettingsStore::load(path).recovered());
+    }
+
+    #[test]
+    fn ファイルが無いとき_または正常に読めたときrecoveredは立たない() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        assert!(!SettingsStore::load(path.clone()).recovered());
+        std::fs::write(&path, r#"{"max_items": 42}"#).unwrap();
+        assert!(!SettingsStore::load(path).recovered());
+    }
+
+    #[test]
+    fn 読み込みに失敗したときもrecoveredが立ち既定値で起動する() {
+        // ファイルの場所がフォルダだと、読み込みは NotFound ではない失敗になる
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let store = SettingsStore::load(path);
+        assert!(store.recovered());
+        assert_eq!(store.get(), Settings::default());
+    }
+
+    #[test]
+    fn 保存すると一時ファイルは残らず内容が読み直せる() {
+        let dir = temp_dir();
+        let path = dir.join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store
+            .update(SettingsPatch {
+                max_items: Some("7".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!dir.join("settings.json.tmp").exists());
+        assert_eq!(SettingsStore::load(path).get().max_items, 7);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn 設定ファイルは所有者だけが読み書きできる() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir();
+        let sub = dir.join("conf");
+        let path = sub.join("settings.json");
+        let store = SettingsStore::load(path.clone());
+        store.save_shortcut("Alt+Shift+K").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&sub), 0o700);
+    }
+
+    #[test]
+    fn 内部状態を持つスレッドがパニックしても読み書きでき_poisonedを返す() {
+        let dir = temp_dir();
+        let store = SettingsStore::load(dir.join("settings.json"));
+        assert!(!store.is_poisoned());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.current.lock().unwrap();
+            panic!("テスト用のパニック");
+        }));
+        assert!(store.is_poisoned());
+        assert_eq!(store.get(), Settings::default());
+        store
+            .update(SettingsPatch {
+                theme: Some(Theme::Dark),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(store.get().theme, Theme::Dark);
     }
 }

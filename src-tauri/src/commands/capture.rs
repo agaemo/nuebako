@@ -1,4 +1,4 @@
-//! 実行中のアプリの一覧(除外アプリの追加用)。track-clipboard が実装する。
+//! 実行中のアプリの一覧。設定画面で、記録しないアプリを選べるようにするために返す。
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;
