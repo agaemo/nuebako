@@ -1,4 +1,4 @@
-.PHONY: dev build test fmt lint bundle
+.PHONY: dev build test fmt lint bundle licenses
 
 # tauri の generate_context! は frontendDist(../dist)の存在を前提にするため、
 # Rust のビルド・テスト・clippy の前に dist/ を用意する。
@@ -19,3 +19,8 @@ lint:
 
 bundle:
 	mise exec -- pnpm tauri build
+
+# 依存ライブラリのライセンス一覧(Rust: cargo metadata の license 欄、フロント: pnpm licenses list)
+licenses:
+	mise exec -- cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml | mise exec -- python3 -I scripts/licenses.py
+	mise exec -- pnpm licenses list
