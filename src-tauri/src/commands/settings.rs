@@ -20,13 +20,14 @@ fn services(app: &AppHandle) -> Result<(Arc<SettingsStore>, Arc<HistoryService>)
     Ok((state.settings.clone(), state.history.clone()))
 }
 
-#[tauri::command]
+/// 設定ファイルの読み書きや、履歴の件数の再計算を含むため、メインスレッドで動かさない(`async`)。
+#[tauri::command(async)]
 pub fn get_settings(app: AppHandle) -> Result<Settings, AppError> {
     Ok(services(&app)?.0.get())
 }
 
 /// 上限変更の検証と、削除される件数の事前計算(確認ダイアログ用)。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_limits(
     app: AppHandle,
     max_items: String,
@@ -49,7 +50,7 @@ pub fn preview_limits(
 }
 
 /// 設定を更新する。上限を変えたら、上限処理を行い、`settings-changed` と `history-changed` を発行する。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_settings(app: AppHandle, patch: SettingsPatch) -> Result<Settings, AppError> {
     let (store, history) = services(&app)?;
     let before = store.get();
@@ -67,6 +68,8 @@ pub fn update_settings(app: AppHandle, patch: SettingsPatch) -> Result<Settings,
 }
 
 /// 新しいショートカットを登録し、成功したときだけ古いものを解除して保存する。失敗時は元を維持する。
+// 以下の3つ(ショートカットの変更・一時解除・再開)は、登録をプラグインがメインスレッドで実行し、
+// 呼び出し側はその完了を待つだけの短い処理なので、`async` にしても得がなく、そのままにしている。
 #[tauri::command]
 pub fn set_shortcut(app: AppHandle, accelerator: String) -> Result<Settings, AppError> {
     let (store, _) = services(&app)?;

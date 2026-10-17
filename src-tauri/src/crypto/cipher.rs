@@ -1,4 +1,5 @@
-//! AES-256-GCM による1件ずつの暗号化。track-store が実装する。
+//! AES-256-GCM による1件ずつの暗号化。呼び出しごとに nonce を作り、呼び出し側が行の id を追加の認証データとして渡す。
+//! 行の入れ替えや改ざんを、復号の失敗として検出するため。
 
 use aes_gcm::aead::{Aead, AeadCore, Generate, Key, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};

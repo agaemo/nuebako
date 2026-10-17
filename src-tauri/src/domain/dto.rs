@@ -10,8 +10,10 @@ use super::settings::Theme;
 pub struct ClipSummary {
     pub id: i64,
     pub kind: ClipKind,
-    /// 本文の最初の1行(最大200文字)
+    /// 本文の最初の非空の行(最大200文字。制御文字と双方向制御文字は除く)
     pub first_line: String,
+    /// `first_line` より後ろの行数(1行なら 0)
+    pub extra_lines: u32,
     pub copied_at_ms: i64,
     pub pinned: bool,
     pub source_app_name: Option<String>,
@@ -20,12 +22,14 @@ pub struct ClipSummary {
     pub thumb_png: Option<String>,
 }
 
-/// 検索結果。`req_id` は古い応答を捨てるための世代番号で、呼び出し元の値をそのまま返す。
+/// 検索結果の1ページ分。`req_id` は古い応答を捨てるための世代番号で、呼び出し元の値をそのまま返す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClipPage {
     pub req_id: u64,
     /// 履歴の全件数(検索条件に関わらない。ヘッダーの「全 N 件」)
     pub total: u32,
+    /// 検索に一致した全件数(`items` は、このうち `offset` から `limit` 件)
+    pub matched: u32,
     pub items: Vec<ClipSummary>,
 }
 
@@ -56,6 +60,8 @@ pub enum PasteResult {
 pub enum PasteReason {
     NoPermission,
     SendFailed,
+    /// 貼り付け先を確認できず、キーを送らなかった(別のアプリへの誤爆を防ぐため)
+    FocusLost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -82,6 +88,15 @@ pub enum StorageStatus {
     Error,
 }
 
+/// クリップボードの記録の状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureStatus {
+    Ok,
+    /// 監視が繰り返し異常終了した、または読み取りが続けて失敗しており、記録が止まっている
+    Stopped,
+}
+
 /// 起動状態と権限。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AppStatus {
@@ -89,6 +104,9 @@ pub struct AppStatus {
     pub version: String,
     pub storage: StorageStatus,
     pub storage_message: Option<String>,
+    pub capture: CaptureStatus,
+    /// 設定ファイルが壊れていたため、既定の設定で起動した
+    pub settings_recovered: bool,
     pub paste_permission: bool,
     pub permission_guide_dismissed: bool,
 }

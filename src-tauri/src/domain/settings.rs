@@ -17,6 +17,10 @@ pub enum Theme {
 pub const MAX_ITEMS_LIMIT: u32 = 100_000;
 pub const RETENTION_DAYS_LIMIT: u32 = 3_650;
 
+/// 件数の上限と保存期間の既定値。
+pub const DEFAULT_MAX_ITEMS: u32 = 1_000;
+pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
 /// 利用者の設定。`settings.json` に平文で保存する(機密は含まない)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,8 +44,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             shortcut: "CommandOrControl+Shift+V".to_string(),
-            max_items: 1_000,
-            retention_days: 30,
+            max_items: DEFAULT_MAX_ITEMS,
+            retention_days: DEFAULT_RETENTION_DAYS,
             theme: Theme::System,
             excluded_apps: default_excluded_apps(),
             record_unknown_source: true,

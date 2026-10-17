@@ -1,20 +1,23 @@
 //! 履歴ウィンドウ(history)と設定ウィンドウ(settings)の表示・非表示。
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicI64, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
+
+use crate::history::clock::{Clock, SystemClock};
 
 pub const HISTORY: &str = "history";
 pub const SETTINGS: &str = "settings";
 
 /// 履歴ウィンドウを最後に表示した時刻(ミリ秒)。表示直後のフォーカス変動で閉じないために使う。
-static SHOWN_AT_MS: AtomicU64 = AtomicU64::new(0);
+static SHOWN_AT_MS: AtomicI64 = AtomicI64::new(0);
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// 表示した直後に、フォーカスが外れたという通知が(ウィンドウを前面に出す途中で)届くことがある。
+/// それで閉じてしまわないよう、この時間は無視する。
+const BLUR_GRACE_MS: i64 = 400;
+
+/// 表示してから間もなく、フォーカス喪失を無視すべきか。
+fn is_within_blur_grace(now_ms: i64, shown_at_ms: i64) -> bool {
+    now_ms.saturating_sub(shown_at_ms) < BLUR_GRACE_MS
 }
 
 /// 履歴ウィンドウを前面に出し、検索欄にフォーカスを当てる合図を送る。
@@ -23,17 +26,11 @@ pub fn show_history(app: &AppHandle) {
         return;
     };
     crate::platform::focus::remember_frontmost();
-    SHOWN_AT_MS.store(now_ms(), Ordering::SeqCst);
+    SHOWN_AT_MS.store(SystemClock.now_ms(), Ordering::SeqCst);
     let _ = window.center();
     let _ = window.show();
     let _ = window.set_focus();
     let _ = app.emit("history-window-shown", ());
-}
-
-/// 履歴ウィンドウを閉じたとき、元のアプリにフォーカスを戻すか。
-/// 復帰はアプリごと隠す(macOS)ため、設定ウィンドウが表示中なら復帰しない(設定ウィンドウまで消えてしまう)。
-fn should_restore_focus(settings_visible: bool) -> bool {
-    !settings_visible
 }
 
 /// 履歴ウィンドウを隠し、(設定ウィンドウが無ければ)元のアプリにフォーカスを戻す。
@@ -47,7 +44,8 @@ pub fn hide_history(app: &AppHandle) {
             .get_webview_window(SETTINGS)
             .and_then(|w| w.is_visible().ok())
             .unwrap_or(false);
-        if should_restore_focus(settings_visible) {
+        // 復帰はアプリごと隠す(macOS)ため、設定ウィンドウが表示中なら復帰しない(設定ウィンドウまで消えてしまう)
+        if !settings_visible {
             crate::platform::focus::restore_previous(app);
         }
     }
@@ -55,7 +53,7 @@ pub fn hide_history(app: &AppHandle) {
 
 /// ウィンドウのフォーカスが外れたときの処理。表示した直後の変動は無視する。
 pub fn on_history_blur(app: &AppHandle) {
-    if now_ms().saturating_sub(SHOWN_AT_MS.load(Ordering::SeqCst)) < 400 {
+    if is_within_blur_grace(SystemClock.now_ms(), SHOWN_AT_MS.load(Ordering::SeqCst)) {
         return;
     }
     hide_history(app);
@@ -92,13 +90,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 設定ウィンドウが表示中のとき履歴を閉じても元のアプリへ復帰しない() {
-        // 復帰(アプリごと隠す)すると、表示中の設定ウィンドウまで消えてしまう
-        assert!(!should_restore_focus(true));
+    fn 表示の直後はフォーカス喪失を無視し_猶予を過ぎたら閉じる() {
+        assert!(is_within_blur_grace(1_000, 1_000));
+        assert!(is_within_blur_grace(1_399, 1_000));
+        assert!(!is_within_blur_grace(1_400, 1_000));
     }
 
     #[test]
-    fn 設定ウィンドウが無いとき履歴を閉じたら元のアプリへ復帰する() {
-        assert!(should_restore_focus(false));
+    fn 時計が戻っていても猶予の判定でパニックしない() {
+        assert!(is_within_blur_grace(0, 1_000), "戻った時刻は直後として扱う");
+        assert!(is_within_blur_grace(i64::MIN, i64::MAX));
     }
 }

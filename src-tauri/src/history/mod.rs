@@ -1,10 +1,14 @@
-//! 履歴の保存と検索(track-store)。
+//! 履歴の保存と検索。
 
 pub mod clock;
+pub mod hash;
 pub mod search;
 pub mod service;
 
 pub use service::HistoryService;
+
+/// 画像1件の上限(10 MiB)。クリップボードを読む側でも、この大きさを超える画像は読まずに捨てる。
+pub const MAX_IMAGE_BYTES: usize = 10_485_760;
 
 use crate::domain::clip::{ClipContent, NewClip};
 use crate::error::AppError;

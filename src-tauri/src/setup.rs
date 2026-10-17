@@ -1,11 +1,12 @@
 //! 起動時の配線: 設定、履歴(暗号化と保存)、クリップボードの取り込み、定期処理。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::app_state::AppState;
+use crate::capture::health::CaptureHealth;
 use crate::capture::source::{CaptureDeps, ClipboardRsSource, start_capture};
 use crate::capture::suppress;
 use crate::crypto::keystore::KeychainKeyStore;
@@ -16,13 +17,17 @@ use crate::history::clock::{Clock, SystemClock};
 use crate::history::{ClipRecorder, HistoryService, RecordOutcome};
 use crate::platform::apps::SystemAppInspector;
 use crate::settings::store::SettingsStore;
+use crate::storage::perms;
 use crate::tray;
 
 /// 履歴の期間・件数の上限を、定期的に適用する間隔。
 const LIMITS_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// 監視を止めるために、取り込みの元を保持する。
-pub struct CaptureHandle(pub Arc<ClipboardRsSource>);
+/// 監視を止めるために取り込みの元を、記録が止まっていないかを画面に知らせるために失敗の連続を、保持する。
+pub struct CaptureHandle {
+    pub source: Arc<ClipboardRsSource>,
+    pub health: Arc<CaptureHealth>,
+}
 
 /// 記録に成功したら、トレイのアイコンを切り替え、画面に履歴の更新を知らせる。
 struct NotifyingRecorder {
@@ -46,12 +51,13 @@ impl ClipRecorder for NotifyingRecorder {
 
 /// 設定・履歴・取り込みを用意して、アプリの状態として登録する。
 pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = app.path().app_config_dir()?;
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&config_dir)?;
+    // 履歴の暗号化された本体と設定は、Windows ではローミングされないローカルのフォルダに置く
+    // (鍵もこの端末の資格情報にしか無く、別の端末へ同期されても開けないため)。macOS は場所が同じ。
+    let data_dir = app.path().app_local_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
+    perms::restrict_dir(&data_dir);
 
-    let settings = Arc::new(SettingsStore::load(config_dir.join("settings.json")));
+    let settings = Arc::new(SettingsStore::load(data_dir.join("settings.json")));
     let current = settings.get();
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
@@ -68,7 +74,6 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             history.skipped_count()
         );
     }
-    history.set_limits(current.max_items, current.retention_days);
     if status == StorageStatus::Ok {
         let _ = history.apply_limits(current.max_items, current.retention_days);
     }
@@ -76,12 +81,13 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(AppState {
         history: history.clone(),
         settings: settings.clone(),
-        storage: Mutex::new((status, message)),
+        storage: (status, message),
     });
 
     // 鍵や DB が使えないときは、記録を始めない(読み込まず、書き込まず、鍵も作らない)
     if status == StorageStatus::Ok {
         let source = Arc::new(ClipboardRsSource::new(clock.clone()));
+        let health = Arc::new(CaptureHealth::default());
         let settings_for_capture = settings.clone();
         let deps = Arc::new(CaptureDeps {
             source: source.clone(),
@@ -94,8 +100,8 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             suppressor: suppress::shared(),
             clock,
         });
-        start_capture(deps)?;
-        app.manage(CaptureHandle(source));
+        start_capture(deps, health.clone())?;
+        app.manage(CaptureHandle { source, health });
         spawn_limits_worker(app.clone(), history, settings);
     }
     Ok(())
@@ -116,10 +122,13 @@ fn spawn_limits_worker(app: AppHandle, history: Arc<HistoryService>, settings: A
     });
 }
 
-/// アプリの終了時に、クリップボードの監視を止める。
+/// アプリの終了時に、クリップボードの監視を止め、削除済みの内容が WAL に残らないようにする。
 pub fn shutdown(app: &AppHandle) {
     if let Some(handle) = app.try_state::<CaptureHandle>() {
         use crate::capture::source::ClipboardSource;
-        handle.0.stop();
+        handle.source.stop();
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        state.history.checkpoint();
     }
 }

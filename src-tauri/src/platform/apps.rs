@@ -1,4 +1,5 @@
-//! コピー元アプリと実行中アプリの取得(OS 別の実装を束ねる)。track-clipboard が実装する。
+//! コピー元アプリと実行中アプリの取得。OS ごとの実装を束ね、コピー元を決める優先順だけを
+//! OS に依存しない関数にして、テストできるようにしている。
 
 use super::AppInspector;
 use crate::domain::clip::AppRef;

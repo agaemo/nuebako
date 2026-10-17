@@ -1,9 +1,9 @@
 //! クリップボードの監視(clipboard-rs を trait で包む)と、変更時の取り込みの手順。
 //!
-//! 変更の通知 → 形式の一覧 → 記録可否の判定(filter)→ 読み取り → 種類の判定(classify)→
+//! 変更の通知 → 読み取り(snapshot)→ 種類の判定(classify)→ 記録可否の判定(filter)→
 //! `ClipRecorder::record` の順に進む。履歴の内容・コピー元は、ログに出さない。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,14 +11,15 @@ use std::time::Duration;
 
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{
-    Clipboard, ClipboardContext, ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext,
-    ContentFormat, RustImageData, WatcherShutdown,
+    ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext, RustImageData, WatcherShutdown,
 };
 
 use super::classify::classify_text;
-use super::filter::{self, Decision, FORMAT_ZERO_MEANS_EXCLUDE, SkipReason};
+use super::filter::{self, Decision, SkipReason};
+use super::health::CaptureHealth;
+use super::snapshot::{ClipboardSnapshot, read_from_os};
 use super::suppress::{Suppressor, hash_content};
-use crate::domain::clip::{AppRef, ClipContent, ClipKind, NewClip};
+use crate::domain::clip::{ClipContent, ClipKind, NewClip};
 use crate::domain::settings::Settings;
 use crate::error::AppError;
 use crate::history::clock::Clock;
@@ -26,25 +27,11 @@ use crate::history::{ClipRecorder, RecordOutcome};
 use crate::platform::AppInspector;
 use crate::platform::apps::resolve_source;
 
-/// macOS で、コピー元アプリの bundle id を書く慣習の型名。
-const SOURCE_HINT_FORMAT: &str = "org.nspasteboard.source";
 /// サムネイルの最大の辺(px)。一覧では 18px で表示するため、余裕を持たせる。
 const THUMBNAIL_SIZE: u32 = 64;
 /// 監視スレッドの再起動の上限(この時間内に、この回数まで)。
 const RESTART_WINDOW_MS: i64 = 60_000;
 const RESTART_MAX: usize = 5;
-
-/// ある時点のクリップボードの内容。
-pub struct ClipboardSnapshot {
-    /// 利用できる形式の名前(機密の型名の判定に使う)
-    pub formats: Vec<String>,
-    /// 値を見て判定する形式(Windows の `CanIncludeInClipboardHistory` など)の値。形式名をキーにする
-    pub format_values: HashMap<String, Vec<u8>>,
-    pub text: Option<String>,
-    pub image_png: Option<Vec<u8>>,
-    /// `org.nspasteboard.source` などから分かったコピー元
-    pub source_hint: Option<AppRef>,
-}
 
 pub trait ClipboardSource: Send + Sync {
     /// 変更の通知を受けて `on_change` を呼ぶ監視を、専用スレッドで始める(呼び出しはブロックしない)。
@@ -151,53 +138,66 @@ fn set_status(shared: &Shared, status: WatchStatus) {
     }
 }
 
+/// 異常終了の直後に、すぐ再開して busy loop にならないよう待つ時間。
+const RESTART_PAUSE: Duration = Duration::from_millis(500);
+
 /// 監視スレッドの本体。パニックは捕まえて再起動する(上限を超えたら記録を停止する)。
 fn watch_loop(shared: Arc<Shared>, clock: Arc<dyn Clock>, on_change: Arc<dyn Fn() + Send + Sync>) {
+    watch_loop_with(
+        &shared,
+        clock.as_ref(),
+        &|| watch_once(&shared, &on_change),
+        &|| std::thread::sleep(RESTART_PAUSE),
+    );
+}
+
+/// 監視の繰り返しと停止の判定。実際の監視(`run_once`)と待機(`pause`)は、テストで差し替えられるよう引数にする。
+fn watch_loop_with(shared: &Shared, clock: &dyn Clock, run_once: &dyn Fn(), pause: &dyn Fn()) {
     let mut limiter = RestartLimiter::new();
     let mut first = true;
     loop {
         if shared.stop.load(Ordering::SeqCst) {
-            set_status(&shared, WatchStatus::Stopped);
+            set_status(shared, WatchStatus::Stopped);
             return;
         }
         if !first && !limiter.allow(clock.now_ms()) {
-            set_status(&shared, WatchStatus::GaveUp);
+            set_status(shared, WatchStatus::GaveUp);
             eprintln!("クリップボードの監視が繰り返し異常終了したため、記録を停止しました");
             return;
         }
         first = false;
-        set_status(&shared, WatchStatus::Running);
+        set_status(shared, WatchStatus::Running);
 
-        let run = catch_unwind(AssertUnwindSafe(|| {
-            // Windows では、通知を受けるウィンドウをこのスレッドで作る必要があるため、ここで作る
-            let mut ctx = match ClipboardWatcherContext::new() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            ctx.add_handler(ChangeHandler {
-                on_change: on_change.clone(),
-            });
-            if let Ok(mut slot) = shared.shutdown.lock() {
-                *slot = Some(ctx.get_shutdown_channel());
-            }
-            // 登録の前に stop() が呼ばれていた場合は、すぐ止める
-            if shared.stop.load(Ordering::SeqCst)
-                && let Ok(mut slot) = shared.shutdown.lock()
-            {
-                slot.take();
-            }
-            ctx.start_watch();
-        }));
-        if run.is_err() {
+        if catch_unwind(AssertUnwindSafe(run_once)).is_err() {
             eprintln!("クリップボードの監視でパニックが起きたため、再起動します");
         }
         if shared.stop.load(Ordering::SeqCst) {
-            set_status(&shared, WatchStatus::Stopped);
+            set_status(shared, WatchStatus::Stopped);
             return;
         }
-        // 異常終了の直後に、すぐ再開して busy loop にならないよう少し待つ
-        std::thread::sleep(Duration::from_millis(500));
+        pause();
     }
+}
+
+/// 監視を1回始めて、止まるまでここで待つ。
+fn watch_once(shared: &Shared, on_change: &Arc<dyn Fn() + Send + Sync>) {
+    // Windows では、通知を受けるウィンドウをこのスレッドで作る必要があるため、ここで作る
+    let Ok(mut ctx) = ClipboardWatcherContext::new() else {
+        return;
+    };
+    ctx.add_handler(ChangeHandler {
+        on_change: on_change.clone(),
+    });
+    if let Ok(mut slot) = shared.shutdown.lock() {
+        *slot = Some(ctx.get_shutdown_channel());
+    }
+    // 登録の前に stop() が呼ばれていた場合は、すぐ止める
+    if shared.stop.load(Ordering::SeqCst)
+        && let Ok(mut slot) = shared.shutdown.lock()
+    {
+        slot.take();
+    }
+    ctx.start_watch();
 }
 
 impl ClipboardSource for ClipboardRsSource {
@@ -226,56 +226,7 @@ impl ClipboardSource for ClipboardRsSource {
     }
 
     fn snapshot(&self) -> Result<ClipboardSnapshot, AppError> {
-        // 変更のたびに作る(ハンドラや構造体に保持しない)
-        let ctx = ClipboardContext::new().map_err(|e| AppError::Clipboard(e.to_string()))?;
-        let formats = ctx.available_formats().unwrap_or_default();
-
-        let mut format_values = HashMap::new();
-        if let Some(name) = formats
-            .iter()
-            .find(|f| f.eq_ignore_ascii_case(FORMAT_ZERO_MEANS_EXCLUDE))
-            && let Ok(v) = ctx.get_buffer(name)
-        {
-            format_values.insert(name.clone(), v);
-        }
-
-        let source_hint = formats
-            .iter()
-            .any(|f| f == SOURCE_HINT_FORMAT)
-            .then(|| ctx.get_buffer(SOURCE_HINT_FORMAT).ok())
-            .flatten()
-            .and_then(|b| String::from_utf8(b).ok())
-            .map(|s| s.trim_matches('\0').trim().to_string())
-            .filter(|s| !s.is_empty())
-            .map(|id| AppRef {
-                name: id.clone(),
-                id,
-            });
-
-        // 不正な UTF-16 など読めない場合は None にして読み飛ばす
-        let text = if ctx.has(ContentFormat::Text) {
-            ctx.get_text().ok()
-        } else {
-            None
-        };
-        // テキストがあればテキストを優先する(画像の変換は重いので、必要なときだけ読む)
-        let text_usable = text.as_deref().is_some_and(|t| !t.trim().is_empty());
-        let image_png = if !text_usable && ctx.has(ContentFormat::Image) {
-            ctx.get_image()
-                .ok()
-                .and_then(|img| img.to_png().ok())
-                .map(|png| png.get_bytes().to_vec())
-        } else {
-            None
-        };
-
-        Ok(ClipboardSnapshot {
-            formats,
-            format_values,
-            text,
-            image_png,
-            source_hint,
-        })
+        read_from_os()
     }
 }
 
@@ -311,6 +262,8 @@ pub enum CaptureResult {
     Suppressed,
     /// 読める内容がなかった(対応しない形式、不正な UTF-16 など)
     Unreadable,
+    /// 画像が大きすぎるため、読まずに捨てた
+    TooLarge,
     Failed(String),
 }
 
@@ -333,6 +286,7 @@ pub fn handle_change(deps: &CaptureDeps) -> CaptureResult {
             ),
             Err(_) => return CaptureResult::Unreadable,
         },
+        (_, None) if snap.image_oversize => return CaptureResult::TooLarge,
         // 空白だけのテキストも、記録側(HistoryService)に任せて渡す
         (Some(t), None) => (ClipContent::Text(t.clone()), classify_text(t)),
         (None, None) => return CaptureResult::Unreadable,
@@ -377,27 +331,27 @@ pub fn handle_change(deps: &CaptureDeps) -> CaptureResult {
     }
 }
 
-/// 監視を始める。変更のたびに `handle_change` を呼ぶ(失敗は種別だけを標準エラーに出す)。
-pub fn start_capture(deps: Arc<CaptureDeps>) -> Result<(), AppError> {
+/// 監視を始める。変更のたびに `handle_change` を呼び、結果を `health` に数える
+/// (失敗は種別だけを標準エラーに出す)。
+pub fn start_capture(deps: Arc<CaptureDeps>, health: Arc<CaptureHealth>) -> Result<(), AppError> {
     let source = deps.source.clone();
     source.start(Box::new(move || {
-        if let CaptureResult::Failed(code) = handle_change(&deps) {
+        let result = handle_change(&deps);
+        if let CaptureResult::Failed(code) = &result {
             eprintln!("クリップボードの取り込みに失敗しました: {code}");
         }
+        health.observe(&result);
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::clip::AppRef;
     use crate::domain::settings::Settings;
-
-    struct FixedClock(i64);
-    impl Clock for FixedClock {
-        fn now_ms(&self) -> i64 {
-            self.0
-        }
-    }
+    use crate::history::clock::FixedClock;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU32;
 
     struct FakeSource(Mutex<Option<ClipboardSnapshot>>);
     impl ClipboardSource for FakeSource {
@@ -451,6 +405,7 @@ mod tests {
             format_values: HashMap::new(),
             text: Some(text.to_string()),
             image_png: None,
+            image_oversize: false,
             source_hint: None,
         }
     }
@@ -470,7 +425,7 @@ mod tests {
             recorder: recorder.clone(),
             settings: Arc::new(move || settings.clone()),
             suppressor: suppressor.clone(),
-            clock: Arc::new(FixedClock(10_000)),
+            clock: FixedClock::new(10_000),
         };
         Setup {
             deps,
@@ -598,6 +553,7 @@ mod tests {
             format_values: HashMap::new(),
             text: None,
             image_png: None,
+            image_oversize: false,
             source_hint: None,
         };
         let s = setup(snap, None, Settings::default());
@@ -670,6 +626,7 @@ mod tests {
             format_values: HashMap::new(),
             text: None,
             image_png: Some(tiny_png()),
+            image_oversize: false,
             source_hint: None,
         };
         let s = setup(
@@ -695,10 +652,161 @@ mod tests {
             format_values: HashMap::new(),
             text: None,
             image_png: Some(vec![1, 2, 3]),
+            image_oversize: false,
             source_hint: None,
         };
         let s = setup(snap, None, Settings::default());
         assert_eq!(handle_change(&s.deps), CaptureResult::Unreadable);
+    }
+
+    #[test]
+    fn 画像が大きすぎて読まれなかったときは読めない扱いにせず捨てる() {
+        let mut snap = text_snapshot("", &["public.png"]);
+        snap.text = None;
+        snap.image_oversize = true;
+        let s = setup(snap, None, Settings::default());
+        assert_eq!(handle_change(&s.deps), CaptureResult::TooLarge);
+        assert!(s.recorder.0.lock().unwrap().is_empty());
+    }
+
+    // ---- 監視の繰り返しと停止 ----
+
+    fn shared() -> Shared {
+        Shared {
+            stop: AtomicBool::new(false),
+            shutdown: Mutex::new(None),
+            status: Mutex::new(WatchStatus::NotStarted),
+        }
+    }
+
+    fn status_of(shared: &Shared) -> WatchStatus {
+        *shared.status.lock().unwrap()
+    }
+
+    #[test]
+    fn 監視が繰り返しパニックしたとき上限まで再起動して記録を停止する() {
+        let shared = shared();
+        let runs = AtomicU32::new(0);
+        let pauses = AtomicU32::new(0);
+        // 時計が動かないので、再起動の上限(1分に5回)にすぐ達する
+        watch_loop_with(
+            &shared,
+            FixedClock::new(0).as_ref(),
+            &|| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                panic!("テスト用のパニック");
+            },
+            &|| {
+                pauses.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        // 最初の1回と、再起動の5回
+        assert_eq!(runs.load(Ordering::SeqCst), 1 + RESTART_MAX as u32);
+        assert_eq!(pauses.load(Ordering::SeqCst), 1 + RESTART_MAX as u32);
+        assert_eq!(status_of(&shared), WatchStatus::GaveUp);
+    }
+
+    #[test]
+    fn 再起動の間隔が空いていれば上限に達せず監視を続ける() {
+        let shared = shared();
+        let clock = FixedClock::new(0);
+        let runs = AtomicU32::new(0);
+        watch_loop_with(
+            &shared,
+            clock.as_ref(),
+            &|| {
+                // 1分を超えて間隔を空けながらパニックし、10回目に外から止める
+                if runs.fetch_add(1, Ordering::SeqCst) + 1 == 10 {
+                    shared.stop.store(true, Ordering::SeqCst);
+                }
+                panic!("テスト用のパニック");
+            },
+            &|| clock.advance(RESTART_WINDOW_MS + 1),
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 10);
+        assert_eq!(status_of(&shared), WatchStatus::Stopped);
+    }
+
+    #[test]
+    fn 停止を指示されたら再起動せずに止まる() {
+        let shared = shared();
+        let runs = AtomicU32::new(0);
+        watch_loop_with(
+            &shared,
+            FixedClock::new(0).as_ref(),
+            &|| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                shared.stop.store(true, Ordering::SeqCst);
+            },
+            &|| panic!("停止後は待たない"),
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(status_of(&shared), WatchStatus::Stopped);
+    }
+
+    #[test]
+    fn 開始前に停止を指示されていたら一度も監視しない() {
+        let shared = shared();
+        shared.stop.store(true, Ordering::SeqCst);
+        watch_loop_with(
+            &shared,
+            FixedClock::new(0).as_ref(),
+            &|| panic!("監視してはいけない"),
+            &|| {},
+        );
+        assert_eq!(status_of(&shared), WatchStatus::Stopped);
+    }
+
+    #[test]
+    fn 監視が正常に終わったときも停止の指示がなければ再起動する() {
+        let shared = shared();
+        let runs = AtomicU32::new(0);
+        watch_loop_with(
+            &shared,
+            FixedClock::new(0).as_ref(),
+            &|| {
+                if runs.fetch_add(1, Ordering::SeqCst) == 2 {
+                    shared.stop.store(true, Ordering::SeqCst);
+                }
+            },
+            &|| {},
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+    }
+
+    /// `start` で登録された関数を保持し、読み取りが常に失敗する偽の元。
+    struct FailingSource(Mutex<Option<Box<dyn Fn() + Send + Sync>>>);
+    impl ClipboardSource for FailingSource {
+        fn start(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<(), AppError> {
+            *self.0.lock().unwrap() = Some(on_change);
+            Ok(())
+        }
+        fn stop(&self) {}
+        fn snapshot(&self) -> Result<ClipboardSnapshot, AppError> {
+            Err(AppError::Clipboard("失敗".into()))
+        }
+    }
+
+    #[test]
+    fn 取り込みの失敗が続くと記録の停止として数えられる() {
+        let health = Arc::new(CaptureHealth::default());
+        let source = Arc::new(FailingSource(Mutex::new(None)));
+        let deps = Arc::new(CaptureDeps {
+            source: source.clone(),
+            inspector: Arc::new(FakeInspector { frontmost: None }),
+            recorder: Arc::new(FakeRecorder::default()),
+            settings: Arc::new(Settings::default),
+            suppressor: Arc::new(Suppressor::new()),
+            clock: FixedClock::new(0),
+        });
+        start_capture(deps, health.clone()).unwrap();
+        let guard = source.0.lock().unwrap();
+        let on_change = guard.as_ref().unwrap();
+        for _ in 0..crate::capture::health::CONSECUTIVE_FAILURE_LIMIT {
+            assert!(!health.is_failing());
+            on_change();
+        }
+        assert!(health.is_failing());
     }
 
     /// 実機のクリップボードを読む。手元で明示的に実行する。

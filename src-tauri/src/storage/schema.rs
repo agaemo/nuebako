@@ -27,26 +27,45 @@ pub fn user_version(conn: &Connection) -> Result<i64, AppError> {
         .map_err(db_err)
 }
 
-/// テーブルとインデックスを作り、`user_version` を設定する。
-pub fn create_schema(conn: &Connection) -> Result<(), AppError> {
-    conn.execute_batch(&format!(
-        "BEGIN;
-         CREATE TABLE IF NOT EXISTS meta (
-             key TEXT PRIMARY KEY,
-             value BLOB NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS clips (
-             id INTEGER PRIMARY KEY,
-             copied_at INTEGER NOT NULL,
-             payload BLOB NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS clip_blobs (
-             clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
-             payload BLOB NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS clips_copied_at ON clips(copied_at);
-         PRAGMA user_version = {SCHEMA_VERSION};
-         COMMIT;"
-    ))
-    .map_err(db_err)
+/// テーブルとインデックスを作り、鍵の確認用データ(`key_check`)を書き、`user_version` を設定する。
+/// すべてを1つのトランザクションで行う。途中で止まったときに、「スキーマはあるが `key_check` が無い」
+/// 状態が残ると、次の起動で鍵を確かめられず、恒久的に開けなくなるため。
+pub fn create_schema(conn: &Connection, key_check: &[u8]) -> Result<(), AppError> {
+    conn.execute_batch("BEGIN").map_err(db_err)?;
+    let result = (|| {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+                 key TEXT PRIMARY KEY,
+                 value BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS clips (
+                 id INTEGER PRIMARY KEY,
+                 copied_at INTEGER NOT NULL,
+                 payload BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS clip_blobs (
+                 clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+                 payload BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS clips_copied_at ON clips(copied_at);",
+        )?;
+        write_key_check(conn, key_check)?;
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(db_err),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(db_err(e))
+        }
+    }
+}
+
+/// `meta` に `key_check` を書く(あれば置き換える)。
+pub fn write_key_check(conn: &Connection, key_check: &[u8]) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('key_check', ?1)",
+        [key_check],
+    )
+    .map(|_| ())
 }

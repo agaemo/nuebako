@@ -1,5 +1,7 @@
 //! リポジトリ(SQLite)。1件ずつ暗号化して保存する。
 
+use std::sync::Arc;
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +51,8 @@ pub struct StoredRow {
 
 pub struct Repo {
     conn: Connection,
-    cipher: Cipher,
+    /// 復号をロックの外で行えるよう、共有できる形で持つ
+    cipher: Arc<Cipher>,
 }
 
 /// 履歴本体の AAD。行の入れ替えを検出するため id を含める。
@@ -68,7 +71,15 @@ use schema::db_err;
 
 impl Repo {
     pub fn new(conn: Connection, cipher: Cipher) -> Self {
-        Self { conn, cipher }
+        Self {
+            conn,
+            cipher: Arc::new(cipher),
+        }
+    }
+
+    /// 復号用に暗号器を共有する。
+    pub fn cipher(&self) -> Arc<Cipher> {
+        self.cipher.clone()
     }
 
     /// 接続の設定(WAL など)を適用する。
@@ -87,21 +98,17 @@ impl Repo {
             .map_err(db_err)
     }
 
-    /// 新しい DB にスキーマと key_check を作る。
+    /// 新しい DB にスキーマと key_check を作る(1トランザクション)。
     pub fn init_new(&self) -> Result<(), AppError> {
-        schema::create_schema(&self.conn)?;
         let enc = self.cipher.encrypt(KEY_CHECK_AAD, KEY_CHECK_PLAIN)?;
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('key_check', ?1)",
-                [enc],
-            )
-            .map_err(db_err)?;
-        Ok(())
+        schema::create_schema(&self.conn, &enc)
     }
 
     /// key_check を復号して鍵を確かめる。復号できなければ `KeyMismatch`。
-    /// 行が無い(または meta テーブルが無い)場合は、確認できないため `Storage`。
+    ///
+    /// key_check が無いときは、履歴が1件も無い場合に限り、書き直して自己修復する
+    /// (作成の途中で止まった DB。守るべき履歴が無いので、いまの鍵で確認用データを作ってよい)。
+    /// 履歴の行があるのに無いときは、鍵が正しいか確かめられないため、読み込まず書き込まずにエラーにする。
     pub fn check_key(&self) -> Result<(), AppError> {
         let row: Option<Vec<u8>> =
             match self
@@ -113,11 +120,33 @@ impl Repo {
                 Err(rusqlite::Error::QueryReturnedNoRows) => None,
                 Err(e) => return Err(db_err(e)),
             };
-        let enc = row.ok_or_else(|| AppError::Storage("鍵の確認情報がありません".to_string()))?;
+        let Some(enc) = row else {
+            return self.recreate_key_check_if_empty();
+        };
         match self.cipher.decrypt(KEY_CHECK_AAD, &enc) {
             Ok(plain) if plain == KEY_CHECK_PLAIN => Ok(()),
             _ => Err(AppError::KeyMismatch),
         }
+    }
+
+    fn recreate_key_check_if_empty(&self) -> Result<(), AppError> {
+        let clips: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .map_err(db_err)?;
+        if clips > 0 {
+            return Err(AppError::Storage("鍵の確認情報がありません".to_string()));
+        }
+        let enc = self.cipher.encrypt(KEY_CHECK_AAD, KEY_CHECK_PLAIN)?;
+        schema::write_key_check(&self.conn, &enc).map_err(db_err)
+    }
+
+    /// WAL に残った内容を DB 本体へ書き戻し、WAL を空にする。
+    /// 削除した履歴が WAL に残り続けないようにするため、削除のあとに呼ぶ。失敗しても削除自体は成功している。
+    pub fn checkpoint(&self) {
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     }
 
     /// 1件追加して id を返す。id は AAD に使うため、行を作ってから暗号化して書き込む(1トランザクション)。
@@ -182,6 +211,7 @@ impl Repo {
             .conn
             .execute("DELETE FROM clips WHERE id=?1", [id])
             .map_err(db_err)?;
+        self.checkpoint();
         Ok(n > 0)
     }
 
@@ -198,11 +228,13 @@ impl Repo {
             }
         }
         tx.commit().map_err(db_err)?;
+        self.checkpoint();
         Ok(n)
     }
 
     pub fn delete_all(&self) -> Result<u32, AppError> {
         let n = self.conn.execute("DELETE FROM clips", []).map_err(db_err)?;
+        self.checkpoint();
         Ok(n as u32)
     }
 
@@ -242,17 +274,29 @@ impl Repo {
         Ok((rows, skipped))
     }
 
+    /// 画像本体を復号して返す。
     pub fn load_blob(&self, id: i64) -> Result<Option<Vec<u8>>, AppError> {
-        let enc: Vec<u8> = match self.conn.query_row(
+        self.load_blob_encrypted(id)?
+            .map(|enc| Self::decrypt_blob(&self.cipher, id, &enc))
+            .transpose()
+    }
+
+    /// 画像本体を、復号せず暗号文のまま返す。復号を、DB のロックを離してから行うために使う。
+    pub fn load_blob_encrypted(&self, id: i64) -> Result<Option<Vec<u8>>, AppError> {
+        match self.conn.query_row(
             "SELECT payload FROM clip_blobs WHERE clip_id=?1",
             [id],
             |r| r.get(0),
         ) {
-            Ok(v) => v,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(e) => return Err(db_err(e)),
-        };
-        self.cipher.decrypt(&blob_aad(id), &enc).map(Some)
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    /// `load_blob_encrypted` で取り出した暗号文を復号する。
+    pub fn decrypt_blob(cipher: &Cipher, id: i64, encrypted: &[u8]) -> Result<Vec<u8>, AppError> {
+        cipher.decrypt(&blob_aad(id), encrypted)
     }
 }
 
@@ -576,10 +620,72 @@ mod tests {
     }
 
     #[test]
-    fn key_checkの行が無いときはStorageエラーになる() {
-        let r = repo();
+    fn key_checkの行が無く履歴の行があるときはStorageエラーになる() {
+        let mut r = repo();
+        r.insert(1, &pl("a"), None).unwrap();
         r.conn.execute("DELETE FROM meta", []).unwrap();
         assert!(matches!(r.check_key(), Err(AppError::Storage(_))));
+        let rows: i64 = r
+            .conn
+            .query_row("SELECT COUNT(*) FROM meta", [], |x| x.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "確認できないので書き込まない");
+    }
+
+    #[test]
+    fn key_checkの行が無く履歴も空のときは作り直して通る() {
+        let r = repo();
+        r.conn.execute("DELETE FROM meta", []).unwrap();
+        assert!(r.check_key().is_ok());
+        assert!(r.check_key().is_ok(), "作り直した行で再度確認できる");
+        let other = Repo::new(r.conn, Cipher::new([2u8; 32]));
+        assert_eq!(other.check_key(), Err(AppError::KeyMismatch));
+    }
+
+    #[test]
+    fn スキーマの作成が途中で失敗したときkey_checkもスキーマも残らない() {
+        // meta の挿入が必ず失敗するテーブルを先に作り、同じトランザクション内の失敗を再現する
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL CHECK (0));",
+        )
+        .unwrap();
+        assert!(schema::create_schema(&conn, b"dummy").is_err());
+        let clips: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='clips'",
+                [],
+                |x| x.get(0),
+            )
+            .unwrap();
+        assert_eq!(clips, 0, "clips も巻き戻される");
+        assert_eq!(schema::user_version(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn 新規のdbはスキーマと同時にkey_checkを持つ() {
+        let r = repo();
+        let n: i64 = r
+            .conn
+            .query_row("SELECT COUNT(*) FROM meta WHERE key='key_check'", [], |x| {
+                x.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(schema::user_version(&r.conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn 画像本体の暗号文を取り出して別に復号できる() {
+        let mut r = repo();
+        let png = b"\x89PNG-dummy".to_vec();
+        let id = r.insert(1, &pl("x"), Some(&png)).unwrap();
+        let enc = r.load_blob_encrypted(id).unwrap().unwrap();
+        assert!(!enc.windows(8).any(|w| w == &png[..8]));
+        assert_eq!(Repo::decrypt_blob(&r.cipher(), id, &enc).unwrap(), png);
+        // 別の行の id では復号できない(行の入れ替えの検出)
+        assert!(Repo::decrypt_blob(&r.cipher(), id + 1, &enc).is_err());
+        assert_eq!(r.load_blob_encrypted(id + 1).unwrap(), None);
     }
 
     #[test]

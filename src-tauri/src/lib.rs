@@ -17,29 +17,18 @@ mod tray;
 mod window;
 
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 
-/// 履歴ウィンドウを呼び出す既定のショートカット(macOS は Cmd+Shift+V、Windows は Ctrl+Shift+V)。
-fn default_shortcut() -> Shortcut {
-    #[cfg(target_os = "macos")]
-    let modifiers = Modifiers::SUPER | Modifiers::SHIFT;
-    #[cfg(not(target_os = "macos"))]
-    let modifiers = Modifiers::CONTROL | Modifiers::SHIFT;
-    Shortcut::new(Some(modifiers), Code::KeyV)
-}
-
-/// 保存済みのショートカットを登録する。登録できないときは、通知せずに既定のショートカットに戻す。
+/// 保存済みのショートカットを登録する。登録できないときは、既定のショートカットに戻し、設定も既定に更新する。
 fn register_shortcut(app: &tauri::AppHandle) {
-    use crate::settings::shortcut::{ShortcutRegistrar, TauriRegistrar};
-    if let Some(state) = app.try_state::<crate::app_state::AppState>() {
-        let saved = state.settings.get().shortcut;
-        if TauriRegistrar::new(app.clone()).register(&saved).is_ok() {
-            return;
-        }
-        eprintln!("保存済みのショートカットを登録できないため、既定に戻します");
-    }
-    if let Err(e) = app.global_shortcut().register(default_shortcut()) {
-        eprintln!("既定のショートカットを登録できません: {e}");
+    use crate::settings::shortcut::{TauriRegistrar, register_at_startup};
+    let Some(state) = app.try_state::<crate::app_state::AppState>() else {
+        return;
+    };
+    match register_at_startup(&TauriRegistrar::new(app.clone()), &state.settings) {
+        Ok(true) => eprintln!("保存済みのショートカットを登録できないため、既定に戻しました"),
+        Ok(false) => {}
+        Err(e) => eprintln!("ショートカットを登録できません: {}", e.code()),
     }
 }
 
@@ -71,8 +60,10 @@ pub fn run() {
                     if let Some(state) = window
                         .app_handle()
                         .try_state::<crate::app_state::AppState>()
+                        && let Err(e) =
+                            settings::shortcut::resume(window.app_handle(), &state.settings)
                     {
-                        let _ = settings::shortcut::resume(window.app_handle(), &state.settings);
+                        eprintln!("ショートカットを戻せません: {}", e.code());
                     }
                 }
                 // どちらのウィンドウも、閉じる操作は破棄せず隠す(常駐のため)
