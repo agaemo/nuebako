@@ -37,6 +37,10 @@ export const updateSettings = (patch: SettingsPatch) =>
   invoke<Settings>("update_settings", { patch });
 export const setShortcut = (accelerator: string) =>
   invoke<Settings>("set_shortcut", { accelerator });
+/** ショートカットの入力待ちの間だけ、いまのショートカットを解除する(押したキーを画面に届けるため)。 */
+export const suspendShortcut = () => invoke<void>("suspend_shortcut");
+/** 解除していたショートカットを戻す。解除していなければ何もしない。 */
+export const resumeShortcut = () => invoke<void>("resume_shortcut");
 export const listRunningApps = () => invoke<AppRef[]>("list_running_apps");
 
 /** invoke の失敗(unknown)を AppError として読む。形が違うときは internal として扱う。 */

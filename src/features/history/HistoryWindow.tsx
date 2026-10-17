@@ -253,9 +253,6 @@ export function HistoryWindow() {
               nowMs={nowMs}
               previewOpen={previewOpen}
               onPaste={() => pasteAt(i)}
-              onHover={() => {
-                if (selectedIdRef.current !== clip.id) select(clip.id);
-              }}
               onTogglePreview={() => setPreviewOpen((v) => !v)}
             />
           ))

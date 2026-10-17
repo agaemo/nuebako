@@ -155,6 +155,44 @@ describe("SettingsWindow", () => {
       expect(callsOf(b, "set_shortcut")).toHaveLength(0);
     });
 
+    // 入力待ちの間は、今のショートカットを解除する(押したキーが、グローバルショートカットに奪われないように)
+    it("クリックして入力待ちになったとき、いまのショートカットを一時解除する", async () => {
+      const b = setup();
+      render(<SettingsWindow />);
+      await userEvent.click(await screen.findByRole("button", { name: "呼び出しショートカット" }));
+      await waitFor(() => expect(callsOf(b, "suspend_shortcut")).toHaveLength(1));
+      expect(callsOf(b, "resume_shortcut")).toHaveLength(0);
+    });
+
+    it("Esc で取り消したとき、一時解除したショートカットを戻す", async () => {
+      const b = setup();
+      render(<SettingsWindow />);
+      await userEvent.click(await screen.findByRole("button", { name: "呼び出しショートカット" }));
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(callsOf(b, "resume_shortcut")).toHaveLength(1));
+    });
+
+    it("フォーカスが外れたとき、一時解除したショートカットを戻す", async () => {
+      const b = setup();
+      render(<SettingsWindow />);
+      await userEvent.click(await screen.findByRole("button", { name: "呼び出しショートカット" }));
+      // 入力待ちの間は Tab も入力として扱うため、他の場所をクリックしてフォーカスを外す
+      await userEvent.click(document.body);
+      await waitFor(() => expect(callsOf(b, "resume_shortcut")).toHaveLength(1));
+    });
+
+    it("キーを確定するとき、先にショートカットを戻してから set_shortcut を呼ぶ", async () => {
+      const b = setup();
+      render(<SettingsWindow />);
+      await userEvent.click(await screen.findByRole("button", { name: "呼び出しショートカット" }));
+      await userEvent.keyboard("{Control>}{Alt>}k{/Alt}{/Control}");
+      await waitFor(() => expect(callsOf(b, "set_shortcut")).toHaveLength(1));
+      const order = b.calls
+        .map((c) => c.cmd)
+        .filter((c) => ["suspend_shortcut", "resume_shortcut", "set_shortcut"].includes(c));
+      expect(order).toEqual(["suspend_shortcut", "resume_shortcut", "set_shortcut"]);
+    });
+
     it("入力待ちの Esc は取り消しで、ウィンドウは閉じない", async () => {
       const b = setup();
       render(<SettingsWindow />);

@@ -48,11 +48,17 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
 
 fn set_icon(app: &AppHandle, bytes: &'static [u8]) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        eprintln!("トレイが見つかりません");
         return;
     };
-    if let Ok(image) = Image::from_bytes(bytes) {
-        let _ = tray.set_icon(Some(image));
-        let _ = tray.set_icon_as_template(true);
+    match Image::from_bytes(bytes) {
+        Ok(image) => {
+            // 画像とテンプレートの指定は、1回の呼び出しで同時に反映する(別々だと、反映が揃わないことがある)
+            if let Err(e) = tray.set_icon_with_as_template(Some(image), true) {
+                eprintln!("トレイのアイコンを変更できません: {e}");
+            }
+        }
+        Err(e) => eprintln!("トレイの画像を読み込めません: {e}"),
     }
 }
 

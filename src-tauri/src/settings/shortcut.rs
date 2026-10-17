@@ -1,5 +1,7 @@
 //! ショートカットの変更(新規登録に成功してから旧を解除する)。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
@@ -77,6 +79,50 @@ pub fn change_shortcut(
             Err(e)
         }
     }
+}
+
+/// 入力待ちの間だけ、いまのショートカットを一時的に解除する。
+/// 押したキーが、グローバルショートカットに奪われず、画面に届くようにするため。
+/// 解除したことを `suspended` に記録する(2回呼んでも解除は1回)。
+pub fn suspend_shortcut(
+    registrar: &dyn ShortcutRegistrar,
+    store: &SettingsStore,
+    suspended: &AtomicBool,
+) -> Result<(), AppError> {
+    if suspended.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    registrar.unregister(&store.get().shortcut)?;
+    suspended.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// 一時解除していたショートカットを、登録し直す。解除していなければ何もしない。
+/// 失敗したときは記録を残し、次の機会に再試行できるようにする。
+pub fn resume_shortcut(
+    registrar: &dyn ShortcutRegistrar,
+    store: &SettingsStore,
+    suspended: &AtomicBool,
+) -> Result<(), AppError> {
+    if !suspended.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    registrar.register(&store.get().shortcut)?;
+    suspended.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// アプリ全体で、ショートカットを一時解除中かどうか。
+static SUSPENDED: AtomicBool = AtomicBool::new(false);
+
+/// 本物の登録処理で、入力待ちの間だけ、いまのショートカットを解除する。
+pub fn suspend(app: &AppHandle, store: &SettingsStore) -> Result<(), AppError> {
+    suspend_shortcut(&TauriRegistrar::new(app.clone()), store, &SUSPENDED)
+}
+
+/// 本物の登録処理で、一時解除していたショートカットを戻す。
+pub fn resume(app: &AppHandle, store: &SettingsStore) -> Result<(), AppError> {
+    resume_shortcut(&TauriRegistrar::new(app.clone()), store, &SUSPENDED)
 }
 
 #[cfg(test)]
@@ -195,5 +241,91 @@ mod tests {
             ]
         );
         assert!(!path.exists());
+    }
+
+    // 入力待ちの間だけ今のショートカットを解除し、終わったら必ず戻す(押したキーを画面が受け取れるようにする)
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn 一時解除したとき今のショートカットを解除して印を付ける() {
+        let (store, _) = new_store("suspend");
+        let current = store.get().shortcut;
+        let fake = Fake::default();
+        let flag = AtomicBool::new(false);
+        suspend_shortcut(&fake, &store, &flag).unwrap();
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![format!("unregister {current}")]
+        );
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn 一時解除を2回呼んでも解除は1回だけ() {
+        let (store, _) = new_store("suspend-twice");
+        let fake = Fake::default();
+        let flag = AtomicBool::new(false);
+        suspend_shortcut(&fake, &store, &flag).unwrap();
+        suspend_shortcut(&fake, &store, &flag).unwrap();
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn 再開したとき今のショートカットを登録し直して印を外す() {
+        let (store, _) = new_store("resume");
+        let current = store.get().shortcut;
+        let fake = Fake::default();
+        let flag = AtomicBool::new(false);
+        suspend_shortcut(&fake, &store, &flag).unwrap();
+        resume_shortcut(&fake, &store, &flag).unwrap();
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![
+                format!("unregister {current}"),
+                format!("register {current}")
+            ]
+        );
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn 一時解除していないとき再開しても何もしない() {
+        let (store, _) = new_store("resume-noop");
+        let fake = Fake::default();
+        let flag = AtomicBool::new(false);
+        resume_shortcut(&fake, &store, &flag).unwrap();
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn 再開に失敗したとき印を残して次の機会に再試行できる() {
+        let (store, _) = new_store("resume-fail");
+        let current = store.get().shortcut;
+        let fake = Fake {
+            fail_register: vec![current],
+            ..Default::default()
+        };
+        let flag = AtomicBool::new(false);
+        suspend_shortcut(&fake, &store, &flag).unwrap();
+        assert!(resume_shortcut(&fake, &store, &flag).is_err());
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    // toAccelerator(src/lib/keys.ts)が作る形式を、Tauri のショートカットとして解釈できること
+    #[test]
+    fn フロントエンドが作るショートカットの文字列を解釈できる() {
+        for accel in [
+            "Shift+Command+V",
+            "Control+Shift+V",
+            "Control+Alt+Shift+Command+K",
+            "Alt+1",
+            "Control+F12",
+            "Control+Up",
+            "Alt+Space",
+            "Control+/",
+            "CommandOrControl+Shift+V",
+        ] {
+            assert!(parse(accel).is_ok(), "解釈できない: {accel}");
+        }
     }
 }

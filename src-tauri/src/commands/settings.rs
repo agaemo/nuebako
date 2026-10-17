@@ -74,3 +74,15 @@ pub fn set_shortcut(app: AppHandle, accelerator: String) -> Result<Settings, App
     let _ = app.emit("settings-changed", settings.clone());
     Ok(settings)
 }
+
+/// ショートカットの入力待ちの間だけ、いまのショートカットを解除する(押したキーを画面に届けるため)。
+#[tauri::command]
+pub fn suspend_shortcut(app: AppHandle) -> Result<(), AppError> {
+    crate::settings::shortcut::suspend(&app, &services(&app)?.0)
+}
+
+/// 解除していたショートカットを戻す。解除していなければ何もしない。
+#[tauri::command]
+pub fn resume_shortcut(app: AppHandle) -> Result<(), AppError> {
+    crate::settings::shortcut::resume(&app, &services(&app)?.0)
+}

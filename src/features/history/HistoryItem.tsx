@@ -11,7 +11,6 @@ interface HistoryItemProps {
   nowMs: number;
   previewOpen: boolean;
   onPaste: () => void;
-  onHover: () => void;
   onTogglePreview: () => void;
 }
 
@@ -20,7 +19,7 @@ export const rowNumber = (index: number) => (index === 9 ? "0" : String(index + 
 
 /** 履歴の1行(高さ 24px)。履歴の内容は React のテキストとしてだけ描画する。 */
 export const HistoryItem = forwardRef<HTMLDivElement, HistoryItemProps>(function HistoryItem(
-  { clip, index, selected, nowMs, previewOpen, onPaste, onHover, onTogglePreview },
+  { clip, index, selected, nowMs, previewOpen, onPaste, onTogglePreview },
   ref,
 ) {
   return (
@@ -31,7 +30,6 @@ export const HistoryItem = forwardRef<HTMLDivElement, HistoryItemProps>(function
       aria-selected={selected}
       tabIndex={-1}
       onClick={onPaste}
-      onMouseMove={onHover}
       className={`flex h-6 cursor-default items-center gap-2 rounded-sm px-2 outline-offset-[-2px] ${
         selected ? "bg-select" : "hover:bg-surface"
       }`}

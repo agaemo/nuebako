@@ -199,6 +199,19 @@ describe("HistoryWindow 操作", () => {
     expect(calls(env, "paste_clip")[0].args).toEqual({ id: 3, mode: "auto" });
   });
 
+  it("マウスが行の上を動いても、選択している行は変わらない", async () => {
+    setup({ items: [clip(1), clip(2), clip(3)] });
+    const user = userEvent.setup();
+    render(<HistoryWindow />);
+    await waitFor(() => expect(options().length).toBe(3));
+    expect(options()[0].getAttribute("aria-selected")).toBe("true");
+    await user.hover(options()[2]);
+    await user.pointer({ target: options()[1] });
+    expect(options()[0].getAttribute("aria-selected")).toBe("true");
+    expect(options()[1].getAttribute("aria-selected")).toBe("false");
+    expect(options()[2].getAttribute("aria-selected")).toBe("false");
+  });
+
   it("行のクリックで貼り付ける", async () => {
     const env = setup({ items: [clip(1), clip(2)] });
     const user = userEvent.setup();

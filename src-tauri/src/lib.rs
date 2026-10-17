@@ -66,6 +66,15 @@ pub fn run() {
                 WindowEvent::Focused(false) if label == window::HISTORY => {
                     window::on_history_blur(window.app_handle());
                 }
+                // 設定ウィンドウのフォーカスが外れたら、入力待ちで解除していたショートカットを必ず戻す
+                WindowEvent::Focused(false) if label == window::SETTINGS => {
+                    if let Some(state) = window
+                        .app_handle()
+                        .try_state::<crate::app_state::AppState>()
+                    {
+                        let _ = settings::shortcut::resume(window.app_handle(), &state.settings);
+                    }
+                }
                 // どちらのウィンドウも、閉じる操作は破棄せず隠す(常駐のため)
                 WindowEvent::CloseRequested { api, .. }
                     if label == window::HISTORY || label == window::SETTINGS =>
@@ -100,6 +109,8 @@ pub fn run() {
             commands::settings::preview_limits,
             commands::settings::update_settings,
             commands::settings::set_shortcut,
+            commands::settings::suspend_shortcut,
+            commands::settings::resume_shortcut,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
