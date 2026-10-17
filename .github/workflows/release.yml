@@ -1,0 +1,87 @@
+name: Release
+
+# v* タグの push でインストーラをビルドし、GitHub Releases に下書きとして添付する。
+# 全ジョブが成功したときだけ、最後のジョブで公開する(失敗時は下書きのまま残る)。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # タグ(先頭の v を除く)と、3つの version が一致することを確認する
+      - name: タグと version の一致確認
+        shell: bash
+        run: |
+          set -eu
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version=$(grep -m1 '"version"' package.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+          tauri_version=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+          cargo_version=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+          echo "tag=$tag_version package.json=$pkg_version tauri.conf.json=$tauri_version Cargo.toml=$cargo_version"
+          for v in "$pkg_version" "$tauri_version" "$cargo_version"; do
+            if [ "$v" != "$tag_version" ]; then
+              echo "::error::タグ($tag_version)と version が一致しません"
+              exit 1
+            fi
+          done
+
+  build:
+    needs: check
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            targets: aarch64-apple-darwin
+          - os: windows-latest
+            args: ""
+            targets: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm install -g pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: ${{ matrix.targets }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      # 署名・公証は行わない(署名用の secrets は使わない)
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "nuebako ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          args: ${{ matrix.args }}
+
+  # build の全マトリクスが成功したときだけ実行される。失敗時は下書きのまま公開されない
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下書きを公開
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
