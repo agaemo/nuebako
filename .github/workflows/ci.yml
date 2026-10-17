@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # 手動実行では、macOS と Windows のインストーラをビルドして、成果物として取得できる(Windows 実機での確認用)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm install -g pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt,clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      # tauri の generate_context! は ../dist の存在を前提にするため、先にフロントエンドをビルドする
+      - run: pnpm build
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm exec oxlint src/
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: pnpm exec vitest run
+
+  bundle:
+    if: github.event_name == 'workflow_dispatch'
+    needs: check
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            targets: aarch64-apple-darwin
+          - os: windows-latest
+            args: ""
+            targets: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm install -g pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: ${{ matrix.targets }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: pnpm install --frozen-lockfile
+      # tagName を指定しないので、リリースは作らず、ビルドだけ行う
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true

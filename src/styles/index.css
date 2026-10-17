@@ -1,0 +1,64 @@
+@import "tailwindcss";
+@import "@fontsource/shippori-mincho/latin-700.css";
+@import "@fontsource/jetbrains-mono/latin-500.css";
+@import "./tokens.css";
+
+/* トークンを Tailwind のユーティリティ(bg-bg、text-text-sub など)として使えるようにする */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-text-sub: var(--text-sub);
+  --color-select: var(--select);
+  --color-select-text: var(--select-text);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-info: var(--info);
+  --color-kind-text: var(--k-text);
+  --color-kind-url: var(--k-url);
+  --color-kind-code: var(--k-code);
+  --color-kind-path: var(--k-path);
+  --color-kind-image: var(--k-image);
+
+  --font-display: "Shippori Mincho", "Hiragino Mincho ProN", serif;
+  --font-body: "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --shadow-window: var(--shadow-window);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* キーボードのフォーカスは朱の枠で常に見えるようにする */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

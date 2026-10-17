@@ -1,0 +1,82 @@
+/*
+ * 色のトークン(design-system.md)。ライトを基準に定義し、ダークで上書きする。
+ * - OS の設定に追従: data-theme が無いとき、prefers-color-scheme: dark で上書き
+ * - 手動: data-theme="light" / "dark"
+ * コンポーネントに色を直書きせず、必ずこのトークンを使う。
+ */
+:root {
+  --bg: #f4f3ef;
+  --surface: #ffffff;
+  --line: #cfcdc6;
+  --text: #1b1f24;
+  --text-sub: #5a646e;
+  --select: #dce6f6;
+  --select-text: #2a4572;
+  --accent: #c23a22;
+  --on-accent: #ffffff;
+
+  --success: #1f7a4a;
+  --warning: #8a5a12;
+  --error: #b3261e;
+  --info: #2a4572;
+
+  /* 内容の種類(鵺の継ぎ接ぎ) */
+  --k-text: #2f5fa8;
+  --k-url: #1f8466;
+  --k-code: #a67a0a;
+  --k-path: #6f4fb0;
+  --k-image: #bc4670;
+
+  --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.35);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171c;
+    --surface: #1c2128;
+    --line: #3a444f;
+    --text: #e8eaec;
+    --text-sub: #9aa4ae;
+    --select: #24385a;
+    --select-text: #b8cdee;
+    --accent: #ee6a50;
+    --on-accent: #14171c;
+
+    --success: #6fcf97;
+    --warning: #e5b65c;
+    --error: #f2837a;
+    --info: #7fa8e0;
+
+    --k-text: #6c95d6;
+    --k-url: #4db896;
+    --k-code: #ddb347;
+    --k-path: #a98be0;
+    --k-image: #e27c9c;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #14171c;
+  --surface: #1c2128;
+  --line: #3a444f;
+  --text: #e8eaec;
+  --text-sub: #9aa4ae;
+  --select: #24385a;
+  --select-text: #b8cdee;
+  --accent: #ee6a50;
+  --on-accent: #14171c;
+
+  --success: #6fcf97;
+  --warning: #e5b65c;
+  --error: #f2837a;
+  --info: #7fa8e0;
+
+  --k-text: #6c95d6;
+  --k-url: #4db896;
+  --k-code: #ddb347;
+  --k-path: #a98be0;
+  --k-image: #e27c9c;
+  color-scheme: dark;
+}
