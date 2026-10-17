@@ -9,7 +9,8 @@ async function subscribe<T>(name: string, handler: (payload: T) => void): Promis
 }
 
 /** 記録・削除・上限処理の後。内容は含まれないので、一覧を取り直す。 */
-export const onHistoryChanged = (handler: () => void) => subscribe<null>("history-changed", () => handler());
+export const onHistoryChanged = (handler: () => void) =>
+  subscribe<null>("history-changed", () => handler());
 /** 設定の更新後。 */
 export const onSettingsChanged = (handler: (settings: Settings) => void) =>
   subscribe<Settings>("settings-changed", handler);

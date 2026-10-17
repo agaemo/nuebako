@@ -16,7 +16,13 @@ interface ButtonProps extends Omit<ComponentProps<"button">, "disabled"> {
 }
 
 /** ボタン。busy のときは押しても何も起きないが、フォーカスは保つ。 */
-export function Button({ variant = "secondary", busy = false, onClick, className = "", ...rest }: ButtonProps) {
+export function Button({
+  variant = "secondary",
+  busy = false,
+  onClick,
+  className = "",
+  ...rest
+}: ButtonProps) {
   return (
     <button
       type="button"

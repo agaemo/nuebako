@@ -35,7 +35,9 @@ mod win {
     use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, SetForegroundWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindow, SetForegroundWindow,
+    };
 
     /// 直前の最前面ウィンドウ(ハンドルを整数で保持する。0 は未記録)。
     static PREVIOUS: AtomicIsize = AtomicIsize::new(0);

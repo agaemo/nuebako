@@ -12,8 +12,16 @@ use crate::{paste, window};
 pub fn get_app_status(app: AppHandle) -> Result<AppStatus, AppError> {
     let (storage, storage_message, guide_dismissed) = match app.try_state::<AppState>() {
         Some(state) => {
-            let (status, message) = state.storage.lock().map_err(|_| AppError::Internal("状態を読めません".to_string()))?.clone();
-            (status, message, state.settings.get().permission_guide_dismissed)
+            let (status, message) = state
+                .storage
+                .lock()
+                .map_err(|_| AppError::Internal("状態を読めません".to_string()))?
+                .clone();
+            (
+                status,
+                message,
+                state.settings.get().permission_guide_dismissed,
+            )
         }
         None => (StorageStatus::Ok, None, false),
     };

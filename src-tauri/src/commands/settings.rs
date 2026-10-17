@@ -15,7 +15,11 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, AppError> {
 
 /// 上限変更の検証と、削除される件数の事前計算(確認ダイアログ用)。
 #[tauri::command]
-pub fn preview_limits(app: AppHandle, max_items: String, retention_days: String) -> Result<LimitPreview, AppError> {
+pub fn preview_limits(
+    app: AppHandle,
+    max_items: String,
+    retention_days: String,
+) -> Result<LimitPreview, AppError> {
     Err(AppError::Internal("未実装(track-settings)".to_string()))
 }
 

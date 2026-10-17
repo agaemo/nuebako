@@ -24,7 +24,8 @@ export const listClips = (query: string, reqId: number) =>
 export const getClipDetail = (id: number) => invoke<ClipDetail>("get_clip_detail", { id });
 export const deleteClip = (id: number) => invoke<void>("delete_clip", { id });
 export const clearHistory = () => invoke<number>("clear_history");
-export const setPinned = (id: number, pinned: boolean) => invoke<void>("set_pinned", { id, pinned });
+export const setPinned = (id: number, pinned: boolean) =>
+  invoke<void>("set_pinned", { id, pinned });
 
 export const pasteClip = (id: number, mode: PasteMode) =>
   invoke<PasteOutcome>("paste_clip", { id, mode });
@@ -32,8 +33,10 @@ export const pasteClip = (id: number, mode: PasteMode) =>
 export const getSettings = () => invoke<Settings>("get_settings");
 export const previewLimits = (maxItems: string, retentionDays: string) =>
   invoke<LimitPreview>("preview_limits", { maxItems, retentionDays });
-export const updateSettings = (patch: SettingsPatch) => invoke<Settings>("update_settings", { patch });
-export const setShortcut = (accelerator: string) => invoke<Settings>("set_shortcut", { accelerator });
+export const updateSettings = (patch: SettingsPatch) =>
+  invoke<Settings>("update_settings", { patch });
+export const setShortcut = (accelerator: string) =>
+  invoke<Settings>("set_shortcut", { accelerator });
 export const listRunningApps = () => invoke<AppRef[]>("list_running_apps");
 
 /** invoke の失敗(unknown)を AppError として読む。形が違うときは internal として扱う。 */
