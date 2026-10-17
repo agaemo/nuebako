@@ -9,6 +9,8 @@ const status = (over: Partial<AppStatus> = {}): AppStatus => ({
   version: "0.1.0",
   storage: "ok",
   storage_message: null,
+  capture: "ok",
+  settings_recovered: false,
   paste_permission: true,
   permission_guide_dismissed: false,
   ...over,
@@ -49,10 +51,48 @@ function setup(s: AppStatus, outcome: PasteOutcome = { result: "pasted", reason:
 }
 
 describe("usePaste", () => {
+  it("貼り付けに失敗したとき onError を呼び、次の貼り付けができる", async () => {
+    let fail = true;
+    const calls: unknown[] = [];
+    mockIPC((cmd, args) => {
+      if (cmd === "get_app_status") return status();
+      if (cmd === "paste_clip") {
+        calls.push(args);
+        if (fail) throw { code: "internal", message: "boom" };
+        return { result: "pasted", reason: null };
+      }
+    });
+    const errors: string[] = [];
+    const { result } = renderHook(() => usePaste({ onError: (m) => errors.push(m) }));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
+    await act(async () => {
+      await result.current.paste(1);
+    });
+    expect(errors).toEqual(["貼り付けに失敗しました"]);
+    expect(result.current.busy).toBe(false);
+    fail = false;
+    await act(async () => {
+      await result.current.paste(1);
+    });
+    expect(calls.length).toBe(2);
+  });
+
+  it("結果の reason が focus_lost のとき、貼り付け先を確認できなかった旨の案内を出す", async () => {
+    setup(status(), { result: "copied_only", reason: "focus_lost" });
+    const { result } = renderHook(() => usePaste());
+    await waitFor(() => expect(result.current.status).not.toBeNull());
+    await act(async () => {
+      await result.current.paste(1);
+    });
+    expect(result.current.focusLostNote).toBe(true);
+    expect(result.current.sendFailedNote).toBe(false);
+    expect(result.current.noPermissionNote).toBe(false);
+  });
+
   it("権限があるとき paste_clip(id, auto) を呼ぶ", async () => {
     const t = setup(status());
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(7);
     });
@@ -61,10 +101,10 @@ describe("usePaste", () => {
     expect(result.current.noPermissionNote).toBe(false);
   });
 
-  it("権限なしで案内が未表示のとき、貼り付けずに案内(S4)を出す", async () => {
+  it("権限なしで案内が未表示のとき、貼り付けずに案内を出す", async () => {
     const t = setup(status({ paste_permission: false }));
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(7);
     });
@@ -78,7 +118,7 @@ describe("usePaste", () => {
       reason: "no_permission",
     });
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(7);
     });
@@ -107,7 +147,7 @@ describe("usePaste", () => {
   it("結果の reason が no_permission のとき、フッターの案内を出す", async () => {
     setup(status(), { result: "copied_only", reason: "no_permission" });
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     expect(result.current.noPermissionNote).toBe(false);
     await act(async () => {
       await result.current.paste(1);
@@ -119,7 +159,7 @@ describe("usePaste", () => {
   it("結果の reason が send_failed のとき、別の案内を出す", async () => {
     setup(status(), { result: "copied_only", reason: "send_failed" });
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(1);
     });
@@ -131,7 +171,7 @@ describe("usePaste", () => {
     const t = setup(status());
     t.holdPaste();
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     let first!: Promise<void>;
     act(() => {
       first = result.current.paste(1);
@@ -152,7 +192,7 @@ describe("usePaste", () => {
   it("案内の「システム設定を開く」のとき open_accessibility_settings を呼び、案内は閉じない", async () => {
     const t = setup(status({ paste_permission: false }));
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(7);
     });
@@ -166,7 +206,7 @@ describe("usePaste", () => {
   it("案内を閉じる(Esc)とき貼り付けず、案内だけ閉じる", async () => {
     const t = setup(status({ paste_permission: false }));
     const { result } = renderHook(() => usePaste());
-    await waitFor(() => expect(result.current.statusLoaded).toBe(true));
+    await waitFor(() => expect(result.current.status).not.toBeNull());
     await act(async () => {
       await result.current.paste(7);
     });

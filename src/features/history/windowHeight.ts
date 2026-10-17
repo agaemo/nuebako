@@ -12,15 +12,20 @@ const FOOTER = 26;
 /** 0件のときの案内文の領域 */
 const EMPTY_AREA = 72;
 
-/** 内容(表示する行数、プレビューの開閉と、選択中の種類)に合わせたウィンドウの高さ。 */
+/**
+ * 内容(表示する行数、プレビューの開閉と、選択中の種類)に合わせたウィンドウの高さ。
+ * 行数は MAX_ROWS で頭打ちにする(それ以上はスクロールで見る)。
+ * extra は、一覧の上の状態の帯など、行以外に足す高さ。
+ */
 export function windowHeight(
   rowCount: number,
   previewOpen: boolean,
   previewKind?: ClipKind,
+  extra = 0,
 ): number {
   const rows = Math.min(Math.max(rowCount, 0), MAX_ROWS);
   const list = rows === 0 ? EMPTY_AREA : rows * ROW_HEIGHT;
-  return HEADER + SEARCH + list + FOOTER + (previewOpen ? previewHeight(previewKind) : 0);
+  return HEADER + SEARCH + list + FOOTER + extra + (previewOpen ? previewHeight(previewKind) : 0);
 }
 
 /** プレビューの高さ。画像は高く、それ以外は既定。 */

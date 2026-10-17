@@ -25,6 +25,8 @@ interface Backend {
   total: number;
   running: AppRef[];
   setShortcutError?: { code: string; message: string };
+  /** 設定した間、最初の update_settings の応答を止める */
+  holdUpdate?: Promise<unknown> | null;
 }
 
 /** IPC の偽のバックエンドを作る。呼ばれたコマンドを calls に記録する。 */
@@ -51,6 +53,14 @@ function setup(overrides: Partial<Backend> = {}) {
           return backend.preview(a.maxItems as string, a.retentionDays as string);
         case "update_settings": {
           const patch = a.patch as Record<string, unknown>;
+          if (backend.holdUpdate) {
+            const hold = backend.holdUpdate;
+            backend.holdUpdate = null;
+            return hold.then(() => {
+              backend.settings = { ...backend.settings, ...patch } as Settings;
+              return backend.settings;
+            });
+          }
           backend.settings = {
             ...backend.settings,
             ...patch,
@@ -64,7 +74,7 @@ function setup(overrides: Partial<Backend> = {}) {
           backend.settings = { ...backend.settings, shortcut: a.accelerator as string };
           return backend.settings;
         case "list_clips":
-          return { req_id: 0, total: backend.total, items: [] };
+          return { req_id: a.reqId, total: backend.total, matched: 0, items: [] };
         case "clear_history":
           return backend.total;
         case "list_running_apps":
@@ -286,6 +296,17 @@ describe("SettingsWindow", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     });
 
+    it("全履歴の件数は、limit 1 の list_clips の total で調べる", async () => {
+      const b = setup({ total: 1000 });
+      render(<SettingsWindow />);
+      await open("履歴");
+      await userEvent.click(screen.getByRole("button", { name: "全履歴を削除" }));
+      await screen.findByRole("dialog");
+      const args = callsOf(b, "list_clips")[0].args as Record<string, unknown>;
+      expect(args).toMatchObject({ query: "", limit: 1, offset: 0 });
+      expect(typeof args.reqId).toBe("number");
+    });
+
     it("全履歴の確認でキャンセルすると削除しない", async () => {
       const b = setup();
       render(<SettingsWindow />);
@@ -345,6 +366,21 @@ describe("SettingsWindow", () => {
         (callsOf(b, "update_settings")[0].args as { patch: { excluded_apps: AppRef[] } }).patch
           .excluded_apps,
       ).toEqual([...baseSettings.excluded_apps, { id: "com.example.app", name: "Example" }]);
+    });
+
+    it("設定の保存が処理中で追加がスキップされたとき、候補を一覧から消さない", async () => {
+      let release!: (v: unknown) => void;
+      const b = setup({ holdUpdate: new Promise((r) => (release = r)) });
+      render(<SettingsWindow />);
+      await userEvent.selectOptions(await screen.findByLabelText("テーマ"), "dark");
+      await waitFor(() => expect(callsOf(b, "update_settings")).toHaveLength(1));
+      await open("除外アプリ");
+      await userEvent.click(screen.getByRole("button", { name: "実行中のアプリから追加" }));
+      const picker = await screen.findByRole("list", { name: "実行中のアプリ" });
+      await userEvent.click(within(picker).getByRole("button", { name: "Example" }));
+      expect(callsOf(b, "update_settings")).toHaveLength(1);
+      expect(screen.getByRole("button", { name: "Example" })).toBeTruthy();
+      release(null);
     });
 
     it("コピー元が不明なときの記録を切り替えられる", async () => {

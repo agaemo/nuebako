@@ -26,7 +26,12 @@ describe("windowHeight", () => {
     expect(windowHeight(5, false, "image")).toBe(windowHeight(5, false));
   });
   it("0件のときは案内文の分の高さを持つ", () => {
-    expect(windowHeight(0, false)).toBeGreaterThan(windowHeight(0, false) - 1);
     expect(windowHeight(0, false)).toBeGreaterThan(80);
+  });
+  it("10行を超える件数でも、行の高さは10行分で頭打ちになる(残りはスクロール)", () => {
+    expect(windowHeight(50, false)).toBe(windowHeight(10, false));
+  });
+  it("状態の帯など、行以外の高さを足せる", () => {
+    expect(windowHeight(3, false, undefined, 40) - windowHeight(3, false)).toBe(40);
   });
 });

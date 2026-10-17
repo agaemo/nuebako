@@ -9,7 +9,7 @@ interface PermissionGuideProps {
 }
 
 /**
- * S4 権限の案内ダイアログ(macOS)。
+ * 権限の案内ダイアログ(macOS)。
  * 「あとで(再コピーのみ)」は、再コピーだけ実行してウィンドウを閉じる。Esc は案内だけを閉じる。
  */
 export function PermissionGuide({ busy, onOpenSettings, onLater, onClose }: PermissionGuideProps) {

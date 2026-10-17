@@ -2,7 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 
 interface CollapsibleSectionProps {
   title: string;
-  /** 初期状態で開くか(S2 では「一般」だけ開く) */
+  /** 初期状態で開くか(設定画面では「一般」だけ開く) */
   defaultOpen?: boolean;
   children: ReactNode;
 }

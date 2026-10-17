@@ -1,32 +1,34 @@
 import { KeyHint } from "../../components/ui/KeyHint";
 
+export interface FooterNote {
+  text: string;
+  /** error は操作の失敗、warning は結果の注意 */
+  tone: "error" | "warning";
+}
+
 interface KeyHintBarProps {
   /** 選択行にフォーカスがある(このときだけピン留め・削除の案内を出す) */
   rowFocused: boolean;
-  /** 自動貼り付けの権限がなく、再コピーのみになる */
-  noPermissionNote: boolean;
-  /** 貼り付けのキー送信に失敗した(クリップボードには設定済み) */
-  sendFailedNote: boolean;
+  /** OS の識別子。削除のキー(macOS は Cmd+Backspace、それ以外は Ctrl+Backspace)の案内に使う */
+  os: string;
+  /** 操作の結果の通知。あるときは、キー案内の代わりに出す */
+  note: FooterNote | null;
   /** 一覧を表示していない(鍵が使えない)とき、キー案内を出さない */
   listHidden: boolean;
   onOpenSettings: () => void;
 }
 
-/** フッター: キー案内と「設定」リンク。権限の案内は、結果の理由に応じて出し分ける。 */
-export function KeyHintBar({
-  rowFocused,
-  noPermissionNote,
-  sendFailedNote,
-  listHidden,
-  onOpenSettings,
-}: KeyHintBarProps) {
+/** フッター: キー案内と「設定」リンク。貼り付けや削除の結果は、通知として案内の代わりに出す。 */
+export function KeyHintBar({ rowFocused, os, note, listHidden, onOpenSettings }: KeyHintBarProps) {
   return (
     <div className="flex h-[26px] shrink-0 items-center justify-between gap-2 border-t border-line px-3">
-      {noPermissionNote || sendFailedNote ? (
-        <span role="status" className="min-w-0 truncate text-[11px] text-warning">
-          {noPermissionNote
-            ? "自動貼り付けには権限が必要です(再コピーのみ)"
-            : "貼り付けの送信に失敗しました(内容はコピー済みです)"}
+      {note ? (
+        <span
+          role="status"
+          aria-label="操作の結果"
+          className={`min-w-0 truncate text-[11px] ${note.tone === "error" ? "text-error" : "text-warning"}`}
+        >
+          {note.text}
         </span>
       ) : (
         <span className="flex min-w-0 items-center gap-2">
@@ -39,7 +41,7 @@ export function KeyHintBar({
               {rowFocused && (
                 <>
                   <KeyHint keys="P">ピン留め</KeyHint>
-                  <KeyHint keys="Del">削除</KeyHint>
+                  <KeyHint keys={os === "macos" ? "Del / ⌘⌫" : "Del / Ctrl+⌫"}>削除</KeyHint>
                 </>
               )}
             </>
