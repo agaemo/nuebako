@@ -16,7 +16,10 @@ pub enum AppError {
     /// 保存(SQLite)の失敗。内容は含めない
     Storage(String),
     /// 入力の検証エラー
-    Validation { field: String, message: String },
+    Validation {
+        field: String,
+        message: String,
+    },
     /// ショートカットを登録できない(他のアプリと競合など)
     ShortcutConflict(String),
     NotFound,
@@ -109,7 +112,11 @@ mod tests {
 
     #[test]
     fn 検証エラーはfieldを含む() {
-        let json = serde_json::to_value(AppError::validation("max_items", "1以上の整数で入力してください")).unwrap();
+        let json = serde_json::to_value(AppError::validation(
+            "max_items",
+            "1以上の整数で入力してください",
+        ))
+        .unwrap();
         assert_eq!(json["code"], "validation");
         assert_eq!(json["field"], "max_items");
     }

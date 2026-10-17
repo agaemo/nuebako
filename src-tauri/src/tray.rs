@@ -1,8 +1,8 @@
 //! トレイアイコンとメニュー(履歴を開く / 設定 / 終了)。
 
+use tauri::AppHandle;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::AppHandle;
 
 use crate::window;
 

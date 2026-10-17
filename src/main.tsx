@@ -9,5 +9,7 @@ import "./styles/index.css";
 const label = getCurrentWindow().label;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{label === "settings" ? <SettingsWindow /> : <HistoryWindow />}</React.StrictMode>,
+  <React.StrictMode>
+    {label === "settings" ? <SettingsWindow /> : <HistoryWindow />}
+  </React.StrictMode>,
 );

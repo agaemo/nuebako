@@ -28,7 +28,10 @@ pub struct AppRef {
 pub enum ClipContent {
     Text(String),
     /// 画像(PNG)とサムネイル(PNG)
-    Image { png: Vec<u8>, thumb_png: Vec<u8> },
+    Image {
+        png: Vec<u8>,
+        thumb_png: Vec<u8>,
+    },
 }
 
 /// 保存済みのクリップ。
