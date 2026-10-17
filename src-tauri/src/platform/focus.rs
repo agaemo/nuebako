@@ -25,7 +25,11 @@ pub fn restore_previous(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     let _ = app.hide();
     #[cfg(windows)]
-    win::restore();
+    {
+        // Windows では AppHandle を使わない(直前のウィンドウのハンドルを記録しているため)
+        let _ = app;
+        win::restore();
+    }
     #[cfg(not(any(target_os = "macos", windows)))]
     let _ = app;
 }
