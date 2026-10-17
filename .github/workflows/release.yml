@@ -123,21 +123,27 @@ jobs:
           pattern: installer-*
           path: release
           merge-multiple: true
-      - name: SHA256SUMS を作成
+      # upload-artifact は、共通の親フォルダからの相対パスを保つため、成果物が深い階層に入る。1つのフォルダにまとめる
+      - name: 成果物をまとめて、SHA256SUMS を作成
         shell: bash
         run: |
           set -eu
-          shopt -s nullglob
-          cd release
-          sha256sum -- *.dmg *.exe > SHA256SUMS
+          mkdir -p dist-files
+          find release -type f \( -name '*.dmg' -o -name '*.exe' \) -exec cp -t dist-files {} +
+          cd dist-files
+          if [ -z "$(ls -A)" ]; then
+            echo "::error::インストーラが見つかりません"
+            exit 1
+          fi
+          sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: release/*
+          subject-path: dist-files/*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-files
-          path: release/*
+          path: dist-files/*
           if-no-files-found: error
 
   # build と provenance の全てが成功したときだけ実行される。ビルドは含まない
@@ -157,6 +163,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # フォルダが混ざっていると、添付に失敗する(成果物は、平らなファイルだけ)
+          if [ -n "$(find release -mindepth 1 -type d)" ]; then
+            echo "::error::成果物にフォルダが含まれています"
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" release/* \
             --verify-tag \
             --title "nuebako $GITHUB_REF_NAME" \
