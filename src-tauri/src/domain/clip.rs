@@ -1,8 +1,5 @@
 //! 履歴(クリップ)の型。
 
-// 骨組み(P1-4)。利用側は各トラックが実装するため、P3-1 でこの属性を外す。
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 /// 内容の種類。行の左端の色の印に対応する。
@@ -32,18 +29,6 @@ pub enum ClipContent {
         png: Vec<u8>,
         thumb_png: Vec<u8>,
     },
-}
-
-/// 保存済みのクリップ。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Clip {
-    pub id: i64,
-    /// UTC の Unix ミリ秒。重複で繰り上げたときに更新する
-    pub copied_at_ms: i64,
-    pub kind: ClipKind,
-    pub content: ClipContent,
-    pub source_app: Option<AppRef>,
-    pub pinned: bool,
 }
 
 /// 新しく記録するクリップ。

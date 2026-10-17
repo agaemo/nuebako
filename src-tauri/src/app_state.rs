@@ -1,6 +1,3 @@
-// 骨組み(P1-4)。本体は各トラックで実装し、P3-1 でこの属性を外す。
-#![allow(dead_code, unused_variables)]
-
 //! アプリ全体で共有する状態(`tauri::Builder::manage` で登録する。登録は P3-1)。
 
 use std::sync::{Arc, Mutex};

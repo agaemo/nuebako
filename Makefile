@@ -1,4 +1,4 @@
-.PHONY: dev build test fmt lint bundle licenses
+.PHONY: dev build test fmt lint bundle licenses icons
 
 # tauri の generate_context! は frontendDist(../dist)の存在を前提にするため、
 # Rust のビルド・テスト・clippy の前に dist/ を用意する。
@@ -24,3 +24,8 @@ bundle:
 licenses:
 	mise exec -- cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml | mise exec -- python3 -I scripts/licenses.py
 	mise exec -- pnpm licenses list
+
+# アプリアイコン一式(src-tauri/icons)を、design/icons/app-1024.png から生成する。
+# トレイ用の画像(tray*.png)は design/icons/*.svg から作り、src-tauri/icons に置く(README の「アイコン」参照)。
+icons:
+	mise exec -- pnpm tauri icon design/icons/app-1024.png

@@ -1,6 +1,3 @@
-// 骨組み(P1-4)の属性。利用側の接続は P3-1 で行うため、残してよい。
-#![allow(dead_code, unused_variables)]
-
 //! macOS 固有の実装(objc2 / objc2-app-kit)。コピー元アプリの取得と、実行中アプリの一覧。
 
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};

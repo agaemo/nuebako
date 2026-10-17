@@ -11,6 +11,7 @@ mod history;
 mod paste;
 mod platform;
 mod settings;
+mod setup;
 mod storage;
 mod tray;
 mod window;
@@ -25,6 +26,21 @@ fn default_shortcut() -> Shortcut {
     #[cfg(not(target_os = "macos"))]
     let modifiers = Modifiers::CONTROL | Modifiers::SHIFT;
     Shortcut::new(Some(modifiers), Code::KeyV)
+}
+
+/// 保存済みのショートカットを登録する。登録できないときは、通知せずに既定のショートカットに戻す。
+fn register_shortcut(app: &tauri::AppHandle) {
+    use crate::settings::shortcut::{ShortcutRegistrar, TauriRegistrar};
+    if let Some(state) = app.try_state::<crate::app_state::AppState>() {
+        let saved = state.settings.get().shortcut;
+        if TauriRegistrar::new(app.clone()).register(&saved).is_ok() {
+            return;
+        }
+        eprintln!("保存済みのショートカットを登録できないため、既定に戻します");
+    }
+    if let Err(e) = app.global_shortcut().register(default_shortcut()) {
+        eprintln!("既定のショートカットを登録できません: {e}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -64,7 +80,8 @@ pub fn run() {
             let handle = app.handle().clone();
             platform::focus::setup_activation(&handle);
             tray::build(&handle)?;
-            handle.global_shortcut().register(default_shortcut())?;
+            setup::init(&handle)?;
+            register_shortcut(&handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -84,6 +101,11 @@ pub fn run() {
             commands::settings::update_settings,
             commands::settings::set_shortcut,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                setup::shutdown(app);
+            }
+        });
 }

@@ -1,6 +1,3 @@
-// 骨組み(P1-4)。本体は各トラックで実装し、P3-1 でこの属性を外す。
-#![allow(dead_code, unused_variables)]
-
 //! 貼り付けの手順: 抑止の登録、書き込み、ウィンドウを閉じる(フォーカス復帰を含む)、待機、キー送信、繰り上げ。
 //!
 //! 実際の OS 操作はすべて trait の裏に置き、この手順だけを偽実装でテストする。
@@ -257,7 +254,7 @@ mod tests {
 
     #[test]
     fn キー送信に失敗したとき再コピーのみで理由は送信失敗() {
-        let (flow, log) = flow_with(true, false, true, false);
+        let (flow, _log) = flow_with(true, false, true, false);
         let out = flow.run(1, PasteMode::Auto).unwrap();
         assert_eq!(out.result, PasteResult::CopiedOnly);
         assert_eq!(out.reason, Some(PasteReason::SendFailed));

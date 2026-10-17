@@ -1,8 +1,5 @@
 //! IPC で画面と受け渡す型。JSON のキーは snake_case(`src/types.ts` と対応させる)。
 
-// 骨組み(P1-4)。利用側は各トラックが実装するため、P3-1 でこの属性を外す。
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use super::clip::{AppRef, ClipKind};

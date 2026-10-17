@@ -1,6 +1,3 @@
-// 骨組み(P1-4)の属性。利用側の接続は P3-1 で行うため、残してよい。
-#![allow(dead_code, unused_variables)]
-
 //! クリップボードの監視(clipboard-rs を trait で包む)と、変更時の取り込みの手順。
 //!
 //! 変更の通知 → 形式の一覧 → 記録可否の判定(filter)→ 読み取り → 種類の判定(classify)→

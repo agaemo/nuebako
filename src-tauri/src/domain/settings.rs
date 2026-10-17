@@ -1,8 +1,5 @@
 //! 設定の型と既定値。
 
-// 骨組み(P1-4)。利用側は各トラックが実装するため、P3-1 でこの属性を外す。
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use super::clip::AppRef;

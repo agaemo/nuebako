@@ -1,6 +1,3 @@
-// 骨組み(P1-4)の属性。利用側の接続は P3-1 で行うため、残してよい。
-#![allow(dead_code, unused_variables)]
-
 //! コピー元アプリと実行中アプリの取得(OS 別の実装を束ねる)。track-clipboard が実装する。
 
 use super::AppInspector;

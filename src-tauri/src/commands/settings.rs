@@ -1,7 +1,4 @@
 //! 設定の取得・更新・ショートカット変更。
-// 骨組み(P1-5)の属性。AppState の登録(P3-1)まで未使用の警告が出るため残す。
-#![allow(unused_variables)]
-
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager};

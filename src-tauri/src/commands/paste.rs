@@ -1,7 +1,4 @@
 //! 貼り付け。track-clipboard が実装する。
-// 骨組み(P1-5)の属性。残してよい(P3-1 で外す)。
-#![allow(unused_variables)]
-
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;

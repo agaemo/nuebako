@@ -1,6 +1,3 @@
-// 骨組み(P1-4)。本体は各トラックで実装し、P3-1 でこの属性を外す。
-#![allow(dead_code, unused_variables)]
-
 //! 履歴の保存と検索(track-store)。
 
 pub mod clock;

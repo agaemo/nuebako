@@ -300,10 +300,6 @@ impl HistoryService {
     ) -> (Self, StorageStatus, Option<String>) {
         match Self::try_open(db_path, key_store) {
             Ok((active, skipped)) => {
-                if skipped > 0 {
-                    // 内容は出さず、件数だけを残す
-                    eprintln!("履歴の読み込みで復号できない行を {skipped} 件読み飛ばしました");
-                }
                 let svc = HistoryService {
                     state: Mutex::new(State::Ready(Box::new(active))),
                     clock,
@@ -367,6 +363,7 @@ impl HistoryService {
     }
 
     /// 開いている `Repo` から作る(読み込み済みの DB 用)。
+    #[cfg(test)]
     pub(crate) fn from_repo(repo: Repo, clock: Arc<dyn Clock>) -> Result<Self, AppError> {
         let (active, skipped) = Active::load(repo)?;
         Ok(HistoryService {

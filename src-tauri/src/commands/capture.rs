@@ -1,7 +1,4 @@
 //! 実行中のアプリの一覧(除外アプリの追加用)。track-clipboard が実装する。
-// 骨組み(P1-5)の属性。残してよい(P3-1 で外す)。
-#![allow(unused_variables)]
-
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;

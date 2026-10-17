@@ -1,8 +1,5 @@
 //! アプリ共通のエラー。フロントエンドには `{ code, message, field? }` で返す。
 
-// 骨組み(P1-4)。利用側は各トラックが実装するため、P3-1 でこの属性を外す。
-#![allow(dead_code)]
-
 use std::fmt;
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -25,7 +22,8 @@ pub enum AppError {
     NotFound,
     /// クリップボードの読み書きの失敗
     Clipboard(String),
-    /// OS の権限が無い
+    /// OS の権限が無い。フロントエンドの `permission_denied` と対応する予約で、現在は発生させていない
+    #[allow(dead_code)]
     PermissionDenied,
     Internal(String),
 }
