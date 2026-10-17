@@ -6,6 +6,12 @@ import type { AppError, Settings, SettingsPatch } from "../../types";
 
 export type UpdateResult = { ok: true; settings: Settings } | { ok: false; error: AppError };
 
+/** 画面側の保存の結果。skipped は、別の保存が処理中で何も送らなかったこと(成功ではない)。 */
+export type SaveResult =
+  | { status: "saved" }
+  | { status: "skipped" }
+  | { status: "error"; message: string };
+
 /**
  * 設定の読み込み・更新・購読。更新の実行中は busy になり、二重実行しない。
  * テーマは設定が変わるたびに反映する。

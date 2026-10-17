@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { digitPasteIndex, toAccelerator } from "./keys";
 
 // 共有ファイル。各トラックが自分のテストを追記する。
-describe("digitPasteIndex(track-ui-history)", () => {
+describe("digitPasteIndex", () => {
   const ev = (
     code: string,
     mods: Partial<Record<"metaKey" | "altKey" | "ctrlKey" | "shiftKey", boolean>> = {},
@@ -50,7 +50,7 @@ describe("digitPasteIndex(track-ui-history)", () => {
   });
 });
 
-// ---- track-settings: toAccelerator ----
+// ---- toAccelerator ----
 describe("toAccelerator", () => {
   const ev = (
     code: string,

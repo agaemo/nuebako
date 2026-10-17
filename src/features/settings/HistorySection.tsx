@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { clearHistory, listClips, previewLimits, toAppError } from "../../lib/ipc";
@@ -24,6 +24,7 @@ export function HistorySection({ settings, update }: HistorySectionProps) {
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [working, setWorking] = useState(false);
+  const reqIdRef = useRef(0);
 
   // 他の経路で設定が変わったときは、入力欄を最新の値に合わせる
   useEffect(() => {
@@ -74,7 +75,8 @@ export function HistorySection({ settings, update }: HistorySectionProps) {
     setWorking(true);
     setMessage(null);
     try {
-      const page = await listClips("", 0);
+      // 件数だけが欲しいので 1 件だけ取得する(全行とサムネイルを IPC に通さない)
+      const page = await listClips("", ++reqIdRef.current, 1, 0);
       if (page.total === 0) {
         setMessage({ kind: "ok", text: "削除する履歴はありません" });
       } else {

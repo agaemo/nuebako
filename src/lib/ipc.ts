@@ -19,8 +19,9 @@ export const hideWindow = () => invoke<void>("hide_window");
 export const openSettings = () => invoke<void>("open_settings");
 export const openAccessibilitySettings = () => invoke<void>("open_accessibility_settings");
 
-export const listClips = (query: string, reqId: number) =>
-  invoke<ClipPage>("list_clips", { query, reqId });
+/** 履歴の取得。offset から limit 件(Rust 側で 1〜200 に丸められる)。 */
+export const listClips = (query: string, reqId: number, limit: number, offset: number) =>
+  invoke<ClipPage>("list_clips", { query, reqId, limit, offset });
 export const getClipDetail = (id: number) => invoke<ClipDetail>("get_clip_detail", { id });
 export const deleteClip = (id: number) => invoke<void>("delete_clip", { id });
 export const clearHistory = () => invoke<number>("clear_history");

@@ -4,13 +4,14 @@ import { Toggle } from "../../components/ui/Toggle";
 import { listRunningApps, toAppError } from "../../lib/ipc";
 import type { AppRef } from "../../types";
 import { SettingRow } from "./SettingRow";
+import type { SaveResult } from "./useSettings";
 
 interface AppExcludeListProps {
   apps: AppRef[];
   recordUnknownSource: boolean;
-  /** 変更の保存。失敗したときはエラーメッセージ、成功したときは null を返す */
-  onChangeApps: (apps: AppRef[]) => Promise<string | null>;
-  onChangeRecordUnknown: (value: boolean) => Promise<string | null>;
+  /** 変更の保存。結果(保存した、スキップした、失敗した)を返す */
+  onChangeApps: (apps: AppRef[]) => Promise<SaveResult>;
+  onChangeRecordUnknown: (value: boolean) => Promise<SaveResult>;
 }
 
 /** 除外アプリの一覧、実行中のアプリからの追加、コピー元が不明なときの記録の設定。 */
@@ -24,7 +25,12 @@ export function AppExcludeList({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (task: Promise<string | null>) => setError(await task);
+  /** 保存の結果をエラー表示に反映する。スキップ(別の保存が処理中)のときは表示を変えない。 */
+  const run = async (task: Promise<SaveResult>): Promise<SaveResult> => {
+    const result = await task;
+    if (result.status !== "skipped") setError(result.status === "error" ? result.message : null);
+    return result;
+  };
 
   const openPicker = async () => {
     if (loading) return;
@@ -85,10 +91,11 @@ export function AppExcludeList({
                   <button
                     type="button"
                     onClick={async () => {
-                      const message = await onChangeApps([...apps, app]);
-                      setError(message);
-                      if (message === null)
-                        setCandidates(candidates.filter((c) => c.id !== app.id));
+                      const result = await run(onChangeApps([...apps, app]));
+                      // 保存できたときだけ候補から外す(スキップや失敗では、あとで選び直せるよう残す)
+                      if (result.status === "saved") {
+                        setCandidates((prev) => prev && prev.filter((c) => c.id !== app.id));
+                      }
                     }}
                     className="w-full rounded-sm px-2 py-0.5 text-left hover:bg-select"
                   >

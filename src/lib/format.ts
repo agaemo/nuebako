@@ -4,7 +4,8 @@ const pad2 = (n: number) => String(n).padStart(2, "0");
 
 /**
  * 履歴の時刻表示。ローカル時刻で「今日」なら HH:mm、それ以外は M/D。
- * 呼ぶたびに now を取り直す(開きっぱなしで日付が変わっても追従するため)。
+ * now は呼び出し側が渡す(履歴ウィンドウは、一覧の応答を反映した時刻で全行をまとめて描画する。
+ * 取り直しのたびに更新されるので、開きっぱなしで日付が変わっても追従する)。省略時は現在時刻。
  * 時計が戻って未来になったコピーも、日付が違えば M/D で表示する。
  */
 export function formatClipTime(copiedAtMs: number, nowMs: number = Date.now()): string {

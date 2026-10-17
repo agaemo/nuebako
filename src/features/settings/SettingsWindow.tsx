@@ -8,7 +8,7 @@ import { CollapsibleSection } from "./CollapsibleSection";
 import { HistorySection } from "./HistorySection";
 import { SettingRow } from "./SettingRow";
 import { ShortcutInput } from "./ShortcutInput";
-import { useSettings } from "./useSettings";
+import { useSettings, type SaveResult } from "./useSettings";
 
 const THEMES: { value: Theme; label: string }[] = [
   { value: "system", label: "システムに合わせる" },
@@ -25,7 +25,7 @@ async function hideSelf() {
   }
 }
 
-/** 設定ウィンドウ(S2)。Esc または閉じるボタンで隠す。 */
+/** 設定ウィンドウ。Esc または閉じるボタンで隠す。 */
 export function SettingsWindow() {
   const { settings, loadError, update, replace } = useSettings();
   const [version, setVersion] = useState<string | null>(null);
@@ -49,11 +49,11 @@ export function SettingsWindow() {
     };
   }, []);
 
-  /** 更新して、失敗したときはメッセージを返す(成功は null)。 */
-  const save = async (patch: SettingsPatch): Promise<string | null> => {
+  /** 更新して結果を返す。別の保存が処理中のときは skipped で、呼び出し側は表示を変えない。 */
+  const save = async (patch: SettingsPatch): Promise<SaveResult> => {
     const result = await update(patch);
-    if (result === null || result.ok) return null;
-    return result.error.message;
+    if (result === null) return { status: "skipped" };
+    return result.ok ? { status: "saved" } : { status: "error", message: result.error.message };
   };
 
   const commitShortcut = async (accelerator: string): Promise<string | null> => {
@@ -97,9 +97,12 @@ export function SettingsWindow() {
               <select
                 id="theme"
                 value={settings.theme}
-                onChange={async (e) =>
-                  setThemeError(await save({ theme: e.target.value as Theme }))
-                }
+                onChange={async (e) => {
+                  const result = await save({ theme: e.target.value as Theme });
+                  if (result.status !== "skipped") {
+                    setThemeError(result.status === "error" ? result.message : null);
+                  }
+                }}
                 className="rounded-md border border-line bg-surface px-2 py-0.5"
               >
                 {THEMES.map((t) => (

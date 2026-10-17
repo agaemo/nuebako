@@ -1,8 +1,7 @@
-// キー操作の解釈。2つのトラックの共有ファイル。
-// - track-settings: toAccelerator(KeyboardEvent)(ショートカットの文字列化)を追記する
-// - track-ui-history: 番号貼り付けの解釈を追記する
-// それぞれ自分の関数を追加するだけで、相手の関数は変更しない。
-// ---- track-settings: toAccelerator ----
+// キー操作の解釈。設定画面のショートカット入力(toAccelerator)と、
+// 履歴ウィンドウの番号貼り付け(digitPasteIndex)の、2つの画面が使う。
+
+// ---- ショートカットの文字列化 ----
 
 /** toAccelerator が読むキーボードイベントの項目。 */
 export type AcceleratorEvent = Pick<
@@ -65,7 +64,7 @@ function keyName(code: string): string | null {
   return CODE_NAMES[code] ?? null;
 }
 
-// ---- track-ui-history: 番号貼り付けの解釈 ----
+// ---- 番号貼り付けの解釈 ----
 
 /** 番号貼り付けの判定に使うキーイベントの最小限の形 */
 export interface DigitPasteEvent {

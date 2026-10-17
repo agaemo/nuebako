@@ -11,17 +11,16 @@ const MARK_COLORS: Record<ClipKind, string> = {
 };
 
 interface HeaderBarProps {
-  /** 表示している件数 */
-  shown: number;
+  /** 検索に一致した件数(検索語が無いときは全件) */
+  matched: number;
   /** 全件数 */
   total: number;
   /** 一覧を表示していない(鍵が使えない)とき、件数を出さない */
   hideCount?: boolean;
 }
 
-/** ブランド名(明朝体)、5色の継ぎ接ぎのマーク、「履歴 1〜10 件 / 全 N 件」。 */
-export function HeaderBar({ shown, total, hideCount = false }: HeaderBarProps) {
-  const range = shown === 0 ? "0 件" : shown === 1 ? "1 件" : `1〜${shown} 件`;
+/** ブランド名(明朝体)、5色の継ぎ接ぎのマーク、「履歴 N 件 / 全 M 件」。 */
+export function HeaderBar({ matched, total, hideCount = false }: HeaderBarProps) {
   return (
     <div className="flex h-7 shrink-0 items-center justify-between px-3">
       <span className="flex items-center font-display text-[14px] leading-[1.3] font-bold">
@@ -38,7 +37,7 @@ export function HeaderBar({ shown, total, hideCount = false }: HeaderBarProps) {
       </span>
       {hideCount ? null : (
         <span className="font-mono text-[10px] text-text-sub" data-testid="count">
-          履歴 {range} / 全 {total} 件
+          履歴 {matched} 件 / 全 {total} 件
         </span>
       )}
     </div>
