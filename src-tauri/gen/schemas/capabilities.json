@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"履歴ウィンドウと設定ウィンドウに許可する権限(core の最小限)","local":true,"windows":["history","settings"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"履歴ウィンドウと設定ウィンドウに許可する権限(core の最小限)","local":true,"windows":["history","settings"],"permissions":["core:default","core:window:allow-set-size"]}}
