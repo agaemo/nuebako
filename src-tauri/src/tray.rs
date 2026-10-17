@@ -12,7 +12,7 @@ use crate::window;
 const TRAY_ID: &str = "main";
 
 /// 記録した合図として、アイコンを切り替えておく時間。
-const FLASH: Duration = Duration::from_millis(300);
+const FLASH: Duration = Duration::from_millis(600);
 
 // macOS はメニューバーの明暗に合わせるテンプレート画像(黒)、Windows は暗いタスクバー向けの白。
 #[cfg(target_os = "macos")]
@@ -56,7 +56,7 @@ fn set_icon(app: &AppHandle, bytes: &'static [u8]) {
     }
 }
 
-/// 記録した合図として、アイコンを約 300ms だけ切り替える(通知は出さない)。
+/// 記録した合図として、アイコンを約 600ms だけ切り替える(通知は出さない)。
 pub fn flash(app: &AppHandle) {
     set_icon(app, ACTIVE);
     let app = app.clone();

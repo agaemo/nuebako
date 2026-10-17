@@ -74,15 +74,27 @@ export function HistoryWindow() {
   }, [focusReq]);
 
   // ウィンドウの高さを内容に合わせる。テストや Web 表示では失敗しても無視する
-  const height = windowHeight(storageBad ? 0 : visible.length, previewOpen && !storageBad);
+  const previewKind = selectedClip?.kind;
+  const height = windowHeight(
+    storageBad ? 0 : visible.length,
+    previewOpen && !storageBad,
+    previewKind,
+  );
+  // 幅は、利用者が広げたものを保つ(高さだけを内容に合わせる)
   useEffect(() => {
-    try {
-      void getCurrentWindow()
-        .setSize(new LogicalSize(WINDOW_WIDTH, height))
-        .catch(() => {});
-    } catch {
-      // ウィンドウが無い環境
-    }
+    void (async () => {
+      const win = getCurrentWindow();
+      let width = WINDOW_WIDTH;
+      try {
+        const [size, scale] = await Promise.all([win.innerSize(), win.scaleFactor()]);
+        if (size.width > 0 && scale > 0) width = Math.max(WINDOW_WIDTH, size.width / scale);
+      } catch {
+        // 取得できないときは、既定の幅にする
+      }
+      await win.setSize(new LogicalSize(width, height));
+    })().catch(() => {
+      // テストや Web 表示など、ウィンドウが無い環境では無視する
+    });
   }, [height]);
 
   const move = (delta: number) => {
@@ -249,7 +261,9 @@ export function HistoryWindow() {
           ))
         )}
       </div>
-      {previewOpen && !storageBad ? <PreviewPane clipId={selectedClip?.id ?? null} /> : null}
+      {previewOpen && !storageBad ? (
+        <PreviewPane clipId={selectedClip?.id ?? null} tall={previewKind === "image"} />
+      ) : null}
       <KeyHintBar
         rowFocused={rowFocused}
         noPermissionNote={paste.noPermissionNote}

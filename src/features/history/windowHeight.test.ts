@@ -16,6 +16,15 @@ describe("windowHeight", () => {
   it("プレビューを開くと 96px 高くなる", () => {
     expect(windowHeight(5, true) - windowHeight(5, false)).toBe(96);
   });
+  it("画像のプレビューは 240px の高さになる(画像を見やすくする)", () => {
+    expect(windowHeight(5, true, "image") - windowHeight(5, false)).toBe(240);
+  });
+  it("テキストなど画像以外のプレビューは 96px のまま", () => {
+    expect(windowHeight(5, true, "text") - windowHeight(5, false)).toBe(96);
+  });
+  it("プレビューを閉じているときは、画像でも高さは変わらない", () => {
+    expect(windowHeight(5, false, "image")).toBe(windowHeight(5, false));
+  });
   it("0件のときは案内文の分の高さを持つ", () => {
     expect(windowHeight(0, false)).toBeGreaterThan(windowHeight(0, false) - 1);
     expect(windowHeight(0, false)).toBeGreaterThan(80);
