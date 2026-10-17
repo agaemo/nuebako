@@ -1,4 +1,4 @@
-.PHONY: dev build test fmt lint bundle licenses icons
+.PHONY: dev build test fmt lint bundle licenses icons perf
 
 # tauri の generate_context! は frontendDist(../dist)の存在を前提にするため、
 # Rust のビルド・テスト・clippy の前に dist/ を用意する。
@@ -29,3 +29,7 @@ licenses:
 # トレイ用の画像(tray*.png)は design/icons/*.svg から作り、src-tauri/icons に置く(README の「アイコン」参照)。
 icons:
 	mise exec -- pnpm tauri icon design/icons/app-1024.png
+
+# 性能テスト(#[ignore] 付き)を release ビルドで実行する。1,000件の検索の所要時間が基準内かを確認する
+perf:
+	(test -d dist || mise exec -- pnpm build) && mise exec -- cargo test --release --manifest-path src-tauri/Cargo.toml -- --ignored 検索が200ms以内

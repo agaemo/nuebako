@@ -1,8 +1,10 @@
 [package]
 name = "nuebako"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "クリップボードの履歴を暗号化して保存し、ショートカットで呼び出して貼り付けられる常駐アプリ"
+authors = ["agaemo"]
+license = "MIT"
+repository = "https://github.com/agaemo/nuebako"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

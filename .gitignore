@@ -2,6 +2,10 @@ node_modules/
 .DS_Store
 .env
 .env.local
+.env.*
+!.env.example
+.claude/settings.local.json
+.mcp.json
 dist/
 .output/
 data/*.db
