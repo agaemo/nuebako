@@ -510,9 +510,11 @@ mod tests {
 
     #[test]
     fn 除外アプリからのコピーは記録しない() {
+        // 既定の除外アプリの識別子は OS ごとに違う(macOS は bundle id、Windows は exe 名)ため、既定値から取る
+        let excluded = Settings::default().excluded_apps[0].id.clone();
         let s = setup(
             text_snapshot("ダミー", &["public.utf8-plain-text"]),
-            Some(app("com.1password.1password")),
+            Some(app(&excluded)),
             Settings::default(),
         );
         assert_eq!(
@@ -524,7 +526,8 @@ mod tests {
     #[test]
     fn コピー元の申告があるときは最前面より優先する() {
         let mut snap = text_snapshot("ダミー", &["public.utf8-plain-text"]);
-        snap.source_hint = Some(app("com.bitwarden.desktop"));
+        // 既定の除外アプリの識別子は OS ごとに違うため、既定値から取る
+        snap.source_hint = Some(app(&Settings::default().excluded_apps[1].id));
         let s = setup(snap, Some(app("com.apple.Safari")), Settings::default());
         assert_eq!(
             handle_change(&s.deps),
